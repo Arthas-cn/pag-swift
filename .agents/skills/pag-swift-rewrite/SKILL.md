@@ -9,7 +9,7 @@ description: >
 
 # PAG 的 Swift 重写
 
-先读 `AGENTS.md`。本 skill 只补充库领域约束，不重复 R1–R11。
+先读 `Docs/核心实现.md`，再读 `AGENTS.md`。本 skill 只补充库领域约束，不重复 R1–R11。能力范围以核心实现合同为准。
 
 终态是 Swift 实现，不是给上游 C++ libpag 做永久包装，也不是把上游二进制当成运行时依赖。
 
@@ -19,6 +19,10 @@ description: >
 | --- | --- |
 | `packages/pag-swift` | 库。解码、场景图、时间轴、播放、渲染表面、替换 |
 | `app/pag-swift-demo` | 验证集成的 SwiftUI demo，不是库本体 |
+| `resources/` | `.pag` 夹具。demo 以目录引用整份文件夹；测试包通过 `Tests/pag_swiftTests/Resources` 符号链接看到同一目录 |
+| `Docs/核心实现.md` | 后续实现的合同 |
+| `/Users/arthas/shibo/iOSProject/libpag` | 只读。原版行为与 `.pag` 证据 |
+| `/Users/arthas/shibo/iOSProject/VAPPlayerKit` | 只读。缓存、跑马灯、动图的设计参考 |
 
 现状（以仓库为准，过时就改本段）：`Package.swift` 的 tools version 已是 6.4，并打开了 Approachable Concurrency。尚未声明 `platforms` 与 `swiftLanguageModes`。demo 工程仍可能是 Xcode 模板值（部署 27.0、`SWIFT_VERSION = 5.0`、默认 `MainActor`）。那些模板值**不是**基线；改到工程或包清单时对齐 `AGENTS.md` 技术栈。
 
@@ -38,7 +42,7 @@ description: >
 | `PAGComposition` / `PAGLayer` 及子类 | 场景图与时间轴上的图层（纯色、图像、文本、形状、预合成） |
 | `PAGPlayer` | 把某一时刻的合成画到表面；持有当前时间与已提交帧的一致性 |
 | `PAGSurface` | 渲染目标。必须能脱离视图单独使用 |
-| `PAGView` | 平台宿主。iOS / macOS 的薄适配，不承载合成求值 |
+| `PAGView` | 显示宿主。SwiftUI、UIKit、macOS 的 AppKit 都要能播，不只有一种 |
 | `PAGImage` / 文本数据 | 按可编辑索引或按名替换；不要另造一套与上游矛盾的键 |
 | 时间 | 绝对时间是微秒。进度若用 `0...1`，必须和微秒在 API 上区分开 |
 
@@ -48,7 +52,7 @@ description: >
 
 ## 并发
 
-- 库默认 `nonisolated`。解码、合成求值、离屏渲染、资源上传可以在后台做。
+- 库默认 `nonisolated`。解码、合成求值、绘制和资源上传可以在后台做，避免堵住主线程。
 - 只有 UI 宿主（视图、图层挂载、跟窗口生命周期绑在一起的表面）明确走主 actor。
 - 不要无同步地让多线程同时改同一棵图层树或同一块表面。
 - 跨隔离优先传不可变快照或值。正在进行的解码或刷新必须能取消，迟到结果不得覆盖新的时间或替换。
@@ -56,10 +60,9 @@ description: >
 
 ## 渲染
 
-- 只承诺 iOS 26 与 macOS 26。可以用该系统的 Metal、Core Graphics、Core Video、SwiftUI。
-- 不在规则里写死「必须 Metal」或「必须 Canvas」。选定实现时在该模块的注释或规范里说明理由。
-- 播放器 + 表面必须能在没有视图时渲染。视图是宿主，不是渲染器本体。
-- UIKit 与 AppKit 的差异留在适配层；时间轴和合成逻辑两边共用。
+- 渲染用 **Metal**，直接画到显示目标。播放优先：热路径不要先画离屏再拷贝，也不要为播放读回像素。离屏出图不是必须能力。不要引入 OpenGL / CGL。
+- SwiftUI、UIKit、AppKit 都是显示方式。具体类型和分层看后续架构文档，不要把某一种视图写成唯一入口。
+- 时间轴和合成逻辑在 iOS 与 macOS 之间共用。
 
 ## `.pag` 证据
 

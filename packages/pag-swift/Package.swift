@@ -24,6 +24,10 @@ let package = Package(
         .testTarget(
             name: "pag_swiftTests",
             dependencies: ["pag_swift"],
+            resources: [
+                // 指向仓库根目录 resources/。往该目录加 .pag 后，下次 swift test 会一并拷进测试包。
+                .copy("Resources"),
+            ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],

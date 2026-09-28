@@ -8,11 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		C9976A93306A1507007747FB /* pag-swift in Frameworks */ = {isa = PBXBuildFile; productRef = C9976A92306A1507007747FB /* pag-swift */; };
+		D1A0F11E0000000000000002 /* resources in Resources */ = {isa = PBXBuildFile; fileRef = D1A0F11E0000000000000001 /* resources */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* pag-swift-demo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pag-swift-demo.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C9976A90306A14EA007747FB /* pag-swift */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = "pag-swift"; path = "/Users/arthas/shibo/iOSProject/libpag-swift/packages/pag-swift"; sourceTree = "<absolute>"; };
+		D1A0F11E0000000000000001 /* resources */ = {isa = PBXFileReference; lastKnownFileType = folder; name = resources; path = ../../resources; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -38,6 +40,7 @@
 			children = (
 				C9976A90306A14EA007747FB /* pag-swift */,
 				000000000000000000000010 /* pag-swift-demo */,
+				D1A0F11E0000000000000001 /* resources */,
 				C9976A91306A1507007747FB /* Frameworks */,
 				000000000000000000000020 /* Products */,
 			);
@@ -120,6 +123,7 @@
 		000000000000000140000000 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				D1A0F11E0000000000000002 /* resources in Resources */,
 			);
 		};
 /* End PBXResourcesBuildPhase section */

@@ -18,7 +18,7 @@ description: >
 
 | 用户中文意图（含近义说法） | 读取 |
 | --- | --- |
-| 重写 libpag、PAG 文件、时间轴、图层、播放、渲染表面、对照旧 PAG API | `.agents/skills/pag-swift-rewrite/SKILL.md`（必读） |
+| 重写 libpag、按核心合同实现、PAG 文件、时间轴、图层、播放、Metal、SwiftUI 播放视图 | `Docs/核心实现.md`（必读）+ `.agents/skills/pag-swift-rewrite/SKILL.md` |
 | 设计库模块、写实现规范、给另一个 Agent 写代码、只出文档先不实现 | `.agents/skills/component-spec/SKILL.md`（必读）+ `.agents/skills/swift-api-design-guidelines/SKILL.md` |
 | 公开 API 命名、参数标签、调用点是否顺口 | `.agents/skills/swift-api-design-guidelines/SKILL.md` |
 | 并发、async、await、actor、Sendable、渲染与解码的隔离 | `.agents/skills/swift-concurrency-pro/SKILL.md` |

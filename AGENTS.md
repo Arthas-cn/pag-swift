@@ -4,7 +4,12 @@
 
 显式指定时，Cursor 用 `@skill名`，Codex 用 `$skill名`。安装与核对见 `Docs/agent-skills/README.md`。
 
-改 PAG 解码、时间轴、图层、播放、渲染或公开 API 时：先读 `.agents/skills/pag-swift-rewrite/SKILL.md`。
+后续重构与实现以 `Docs/核心实现.md` 为合同。改 PAG 解码、时间轴、图层、播放、渲染或公开 API 时：先读该文档，再读 `.agents/skills/pag-swift-rewrite/SKILL.md`。
+
+只读参考，不要改这两个目录，也不要把它们加成编译依赖：
+
+- 原版 libpag：`/Users/arthas/shibo/iOSProject/libpag`
+- VAPPlayerKit（缓存、跑马灯、动图占位的设计参考）：`/Users/arthas/shibo/iOSProject/VAPPlayerKit`
 
 用户只描述模块能力、要完整实现文档、交给另一个 Agent 写代码时：走 `component-spec`，并读取 `swift-api-design-guidelines` 与 `pag-swift-rewrite`。默认只出规范、不写实现。
 
@@ -15,8 +20,9 @@
 - 语言：Swift 6.4（Xcode 27 自带编译器）。工程写 `SWIFT_VERSION = 6.4`；Xcode 会映射为语言模式 Swift 6（`EFFECTIVE_SWIFT_VERSION = 6`）。按严格并发来写，并使用 Swift 6.4 语法。不要改回 `6.0` 或 5。库与 demo 都开启 Approachable Concurrency。**库的默认 actor isolation 为 `nonisolated`。**
 - 平台：iOS 26.0 与 macOS 26.0 为最低部署版本。可以放心使用这两个系统的 26 API；不要为更早系统加 `#available` 回退或旧架构兼容层，除非任务明确要求。不要在没有任务时把包或工程扩到 watchOS、tvOS、visionOS。
 - 目标：用 Swift **重写** libpag（PAG 矢量动画），不是给上游 C++ 库做永久包装。库在 `packages/pag-swift`；`app/pag-swift-demo` 只验证集成。
-- 公开 API 按能力对照旧的 `PAG*` 概念，用 Swift 惯用命名。禁止把 ObjC 头文件机械翻译成 Swift。最终类型名以仓库实现为准，不在本文件写死。领域细节读 `pag-swift-rewrite`。
-- UI：SwiftUI 只用于 demo。库必须能在没有视图时渲染到表面；不要把 SwiftUI 当成库的架构。
+- `Docs/核心实现.md` 只写技术基线、核心功能和背景，不规定类型划分和公开签名。架构由后续文档决定。对照旧 `PAG*` 只用于核对职责。禁止把 ObjC 头文件机械翻译成 Swift。
+- 渲染：Metal，直接画到显示目标。播放优先，热路径不要先离屏再拷贝，也不要为播放把像素读回 CPU。不要移植原版的 OpenGL / CGL。离屏出图不是必须能力。
+- 界面：SwiftUI、UIKit，以及 macOS 的 AppKit 都要能播。demo 用库的显示能力做验证，不在 App 里另写一套播放器。
 - 包：SPM。`swift-tools-version` 最低 6.4；语言模式用 `swiftLanguageModes: [.v6]`（SPM 没有 `.v6_4`）。`platforms` 声明 iOS 26 与 macOS 26。不要把 tools version 改低，也不要把语言模式改成 `.v5`。
 - demo 工程的部署与语言版本以 target 为准：`IPHONEOS_DEPLOYMENT_TARGET = 26.0`，`MACOSX_DEPLOYMENT_TARGET = 26.0`，`SWIFT_VERSION = 6.4`。Xcode 模板里的部署版本 27.0 和 `SWIFT_VERSION = 5.0` **不是**基线。demo 的 `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` 可以保留，因为界面在主 actor 上。库 target 必须是默认 `nonisolated`，不要为了少写派发把库标成 `@MainActor`。
 

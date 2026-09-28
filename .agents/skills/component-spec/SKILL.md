@@ -16,8 +16,8 @@ description: >
 
 ## 工作流
 
-1. 读 `AGENTS.md` 技术栈，并读 `.agents/skills/pag-swift-rewrite/SKILL.md`。
-2. 读用户描述，并打开目标包已有文档（若有）。不要引用其它仓库的业务文档。
+1. 读 `Docs/核心实现.md` 与 `AGENTS.md`，并读 `.agents/skills/pag-swift-rewrite/SKILL.md`。新模块规范不得推翻其中的 Metal、SwiftUI / UIKit / AppKit 显示和技术基线。核心文档没有规定类型划分和公开签名。
+2. 读用户描述。查原版行为时只读 `/Users/arthas/shibo/iOSProject/libpag`；查缓存、跑马灯、动图时只读 `/Users/arthas/shibo/iOSProject/VAPPlayerKit`。不要把这两个仓库的类型当成已在本仓库实现。
 3. 缺会阻塞合同的信息时先问（边界、非目标、调用方、失败语义），不要用猜测填满公开 API，也不要凭记忆填 `.pag` 二进制布局。
 4. 始终读取 `.agents/skills/swift-api-design-guidelines/SKILL.md`（及它指出的 `references/`），设计公开命名、参数标签与调用点。
 5. 按模块再读领域 skill：并发读 `swift-concurrency-pro`；测试验收读 `swift-testing-pro`；包边界读 `spm-build-analysis`。demo 界面才读 SwiftUI skill。
