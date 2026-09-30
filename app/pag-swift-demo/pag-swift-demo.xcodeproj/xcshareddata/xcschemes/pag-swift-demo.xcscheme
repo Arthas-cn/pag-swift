@@ -49,6 +49,18 @@
             ReferencedContainer = "container:pag-swift-demo.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+         <!-- 显式开启有限宿主验收；正常手动演示可取消勾选。 -->
+         <CommandLineArgument argument = "--verify-pag-hosts" isEnabled = "NO"/>
+         <!-- 可选真实图片与视频合成；正常启动继续使用色彩与动画。 -->
+         <CommandLineArgument argument = "--pag-sample=2" isEnabled = "NO"/>
+         <!-- 可选替换全部图片槽，用于核对两个宿主的素材适配。 -->
+         <CommandLineArgument argument = "--pag-replace-images" isEnabled = "NO"/>
+      </CommandLineArguments>
+      <EnvironmentVariables>
+         <!-- 验收后台layer写入必须使用显式事务，避免无run loop线程漏交隐式事务。 -->
+         <EnvironmentVariable key = "CA_ASSERT_MAIN_THREAD_TRANSACTIONS" value = "1" isEnabled = "NO"/>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
