@@ -28,6 +28,8 @@ enum ShapeContour: Sendable {
     case polyStar(PolyStarContour)
     /// 当前时刻的路径与累计组矩阵；点未预先变换，不重复复制源数组。
     case path(SourcePath, matrix: SceneAffine)
+    /// 已在图层坐标完成裁剪的原生曲线；稳定身份用于后续paint和连续Trim复用。
+    case trimmed(PreparedTrimPath)
 
     /// 从该轮廓局部坐标到形状图层坐标的累计组变换。
     var matrix: SceneAffine {
@@ -36,6 +38,29 @@ enum ShapeContour: Sendable {
         case .ellipse(let value): value.matrix
         case .polyStar(let value): value.matrix
         case .path(_, let matrix): matrix
+        case .trimmed: .identity
+        }
+    }
+
+    /// 引用对象的完整保活成本；生成器参数已包含在轮廓外壳，不重复展开点列。
+    var referencedBytes: Int {
+        switch self {
+        case .path(let path, _): path.estimatedBytes
+        case .trimmed(let value): value.estimatedBytes
+        default: 0
+        }
+    }
+
+    /// 只比较参数或不可变对象身份；不因颜色帧遍历源路径或裁剪后的点数组。
+    func matches(_ other: ShapeContour) -> Bool {
+        switch (self, other) {
+        case let (.rectangle(first), .rectangle(second)): first == second
+        case let (.ellipse(first), .ellipse(second)): first == second
+        case let (.polyStar(first), .polyStar(second)): first == second
+        case let (.path(first, firstMatrix), .path(second, secondMatrix)):
+            first === second && firstMatrix == secondMatrix
+        case let (.trimmed(first), .trimmed(second)): first === second
+        default: false
         }
     }
 }
@@ -56,7 +81,7 @@ final class ShapeGeometry: Sendable {
         try budget.reserve(count: contours.count, stride: 192)
         for contour in contours {
             try Task.checkCancellation()
-            if case .path(let path, _) = contour { try budget.reserve(stride: path.estimatedBytes) }
+            try budget.reserve(stride: contour.referencedBytes)
         }
         if let stroke {
             try budget.reserve(stride: 256)
@@ -74,18 +99,7 @@ final class ShapeGeometry: Sendable {
         for (previous, current) in zip(self.contours, contours) {
             try Task.checkCancellation()
             try budget.reserve(stride: 32)
-            switch (previous, current) {
-            case let (.rectangle(first), .rectangle(second)):
-                guard first == second else { return false }
-            case let (.ellipse(first), .ellipse(second)):
-                guard first == second else { return false }
-            case let (.polyStar(first), .polyStar(second)):
-                guard first == second else { return false }
-            case let (.path(first, firstMatrix), .path(second, secondMatrix)):
-                // 源路径不可变；新形变对象即使点值相同也不遍历比较，避免颜色帧重扫大路径。
-                guard first === second, firstMatrix == secondMatrix else { return false }
-            default: return false
-            }
+            guard previous.matches(current) else { return false }
         }
         return true
     }
@@ -129,15 +143,19 @@ final class PreparedShapeLayer: Sendable {
     let geometryIndicesByPaint: [Int: Int]
     /// 同源paint序号对应的完整颜色程序；不可见paint不入表，命中仍计保活成本。
     let gradientColorizersByPaint: [Int: PreparedGradientColorizer]
+    /// 全部源modifier的稳定序号，包括透明组；复用不依赖本帧是否有可见paint。
+    let trimBatchesByModifier: [Int: PreparedTrimBatch]
     /// 本次完整准备的保守累计计费，包含暂存与路径保活，缓存命中仍须接受新调用预算检查。
     let estimatedBytes: Int
 
     /// 由完整准备器发布，不接受外部构造的任意几何下标。
     init(instructions: [ShapeInstruction], geometries: [ShapeGeometry], geometryIndicesByPaint: [Int: Int],
-         gradientColorizersByPaint: [Int: PreparedGradientColorizer], estimatedBytes: Int) {
+         gradientColorizersByPaint: [Int: PreparedGradientColorizer],
+         trimBatchesByModifier: [Int: PreparedTrimBatch] = [:], estimatedBytes: Int) {
         self.instructions = instructions
         self.geometries = geometries
         self.gradientColorizersByPaint = gradientColorizersByPaint
+        self.trimBatchesByModifier = trimBatchesByModifier
         self.geometryIndicesByPaint = geometryIndicesByPaint
         self.estimatedBytes = estimatedBytes
     }

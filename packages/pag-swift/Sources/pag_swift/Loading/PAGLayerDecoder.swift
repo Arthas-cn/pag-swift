@@ -39,7 +39,8 @@ extension PAGSceneDecoder {
                 guard content == nil else { throw PAGError.invalidFile(reason: "duplicateLayerContent", offset: nil) }
                 content = .precomposition(id: try block.reader.readEncodedUInt32(),
                                          startFrame: try StaticAttributes.frame(from: &block.reader))
-            case 15, 16, 19, 20:
+            case 15...23, 25:
+                // LayerTag.cpp与ShapeGroup共用ReadShape；已实现内容可直接位于层内，不能只允许在组内出现。
                 guard type == 4 else { throw PAGError.invalidFile(reason: "shapeInNonShapeLayer", offset: nil) }
                 shapes.append(try readShape(code: block.code, reader: &block.reader, depth: 1))
             case 53:

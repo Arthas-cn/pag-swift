@@ -1,4 +1,4 @@
-/// 一条子路径的Float测量表和Double提取曲线；不含系统对象，也不把测量误差称为严格弧长界。
+/// 一条子路径的Float测量表及保留原坐标的曲线；消费者决定Float或Double提取，不把测量误差称为严格弧长界。
 struct StrokeDashMeasure: Sendable {
     /// 按源顺序保留的可测曲线；compact规则可能替换其起点。
     let curves: [StrokeDashCurve]
@@ -11,6 +11,12 @@ struct StrokeDashMeasure: Sendable {
 
     /// 输入必须先通过StrokeAdmission；无测量记录返回nil，工作/内存/深度不足或取消抛出。
     static func make(_ path: StrokePath, contour: StrokeSubpath, budget: inout GeometryBudget) throws -> Self? {
+        try make(path, contour: CurveContourRange(verbs: contour.verbs, points: contour.points,
+                                                 isClosed: contour.isClosed), budget: &budget)
+    }
+
+    /// 接受CurveContourIndex或已接纳StrokeSubpath产生的范围；无长度返回nil，不继承描边专用限额。
+    static func make(_ path: StrokePath, contour: CurveContourRange, budget: inout GeometryBudget) throws -> Self? {
         try budget.consume()
         try budget.reserve(stride: 128)
         var builder = StrokeDashMeasureBuilder()
@@ -67,8 +73,8 @@ struct StrokeDashMeasure: Sendable {
         }
     }
 
-    /// lower-bound使距离恰到边界时选择前曲线终点；插值按源码Float运算次序，不提前用Double除法。
-    private func position(at distance: Float, budget: inout GeometryBudget) throws -> (curve: Int, parameter: Float) {
+    /// 对0...length的有限距离做lower-bound，精确顶点选前曲线；调用方先校验范围，保留Float插值。
+    func position(at distance: Float, budget: inout GeometryBudget) throws -> (curve: Int, parameter: Float) {
         var low = 0, high = records.count - 1
         while low < high {
             try budget.consume()

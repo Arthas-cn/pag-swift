@@ -1,7 +1,7 @@
 import Foundation
 @testable import pag_swift
 
-/// 生产显示owner的三类回归输入，不通过整数或Bool把新增生成器和旧属性混为同一分支。
+/// 生产显示owner的形状回归输入，各类共用真实提交门禁，不通过整数或Bool混合能力边界。
 enum MetalShapeFixtureKind: Sendable, CaseIterable {
     /// 已支持的普通描边，包含真实文件回归。
     case stroke
@@ -9,6 +9,10 @@ enum MetalShapeFixtureKind: Sendable, CaseIterable {
     case properties
     /// 已开放的Ellipse/PolyStar，包含纯语义显示、迟到门禁与完整文件回归。
     case generators
+    /// 渐变材料与六份真实Linear/Radial文件；复杂透明度材料仍受解析容量门禁。
+    case gradients
+    /// Trim双模式及两阶段路径准备，包含四份真实mode0文件；mode1仅有源码语义输入。
+    case trimPaths
 
     /// 已完成正式解码和三时刻Metal准备的文件；遇到后续未支持内容的文件不能列入。
     var completeFiles: [String] {
@@ -16,6 +20,9 @@ enum MetalShapeFixtureKind: Sendable, CaseIterable {
         case .stroke: ["0.pag", "list/0.pag", "list/12.pag", "list/13.pag", "list/15.pag", "list/19.pag"]
         case .properties: ["list/14.pag", "list/16.pag", "list/18.pag", "list/9.pag"]
         case .generators: ["TextDirection.pag"]
+        case .gradients: ["gradient/grad_2.pag", "gradient/grad_2_radial.pag", "gradient/grad_5.pag",
+                          "gradient/grad_5_radial.pag", "gradient/grad_9.pag", "gradient/grad_9_radial.pag"]
+        case .trimPaths: ["fans.pag", "refreshing.pag", "test.pag", "wstask_circle.pag"]
         }
     }
 
@@ -29,6 +36,12 @@ enum MetalShapeFixtureKind: Sendable, CaseIterable {
         case .generators:
             return try (MetalShapeGeneratorFixtures.color(polyStar: false), MetalShapeGeneratorFixtures.starRadii(),
                         MetalShapeGeneratorFixtures.groupOpacity())
+        case .gradients:
+            return try (MetalGradientFixtures.animatedColor(), MetalGradientFixtures.dashedStroke(reversed: false),
+                        MetalGradientFixtures.groupOpacity())
+        case .trimPaths:
+            return try (MetalTrimFixtures.filled(animatedColor: true), MetalTrimFixtures.filled(animatedRange: true),
+                        MetalTrimFixtures.groupOpacity())
         }
     }
 }

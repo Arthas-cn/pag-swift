@@ -23,7 +23,8 @@ final class H264Session {
     }
 
     /// 创建明确601的420v会话；仅模拟器允许系统软件解码，其他平台硬解不可用则失败。
-    init(sequence: SourceVideoSequence, cleanup: DispatchQueue, willInvalidate: (@Sendable () -> Void)? = nil) throws {
+    init(sequence: SourceVideoSequence, cleanup: DispatchQueue,
+         willWaitForDecode: (@Sendable () -> Void)? = nil, willInvalidate: (@Sendable () -> Void)? = nil) throws {
         let format = try H264Format(sps: sequence.sps, pps: sequence.pps,
                                     width: sequence.videoWidth, height: sequence.videoHeight)
         let attributes: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -40,7 +41,8 @@ final class H264Session {
             if let raw { VTDecompressionSessionInvalidate(raw) }
             throw PAGError.mediaFailure("h264Session:\(status)")
         }
-        let lifetime = VideoSessionLifetime(session: raw, cleanup: cleanup, willInvalidate: willInvalidate)
+        let lifetime = VideoSessionLifetime(session: raw, cleanup: cleanup,
+            willWaitForDecode: willWaitForDecode, willInvalidate: willInvalidate)
         var value: Unmanaged<CFTypeRef>?
         let queried = VTSessionCopyProperty(raw, key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
                                             allocator: nil, valueOut: &value)

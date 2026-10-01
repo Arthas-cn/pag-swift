@@ -31,6 +31,6 @@ struct ParseKey: Sendable, Hashable {
     init(snapshot: LoadSnapshot, limits: PAGLoadLimits) {
         identity = snapshot.identity
         self.limits = limits
-        decoderRevision = 13
+        decoderRevision = 15
     }
 }

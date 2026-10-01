@@ -1,6 +1,7 @@
 import CoreMedia
 import Dispatch
 import Foundation
+import Synchronization
 import Testing
 import VideoToolbox
 @testable import pag_swift
@@ -34,12 +35,13 @@ struct VideoCancellationTests {
         await owner.drain()
     }
 
-    /// 真实VT回调尚未返回时取消，独立清理仍启动；旧输出不发布，下一请求从新会话恢复。
+    /// 真实VT回调尚未返回时取消，清理可排队但不得并行Invalidate；旧输出丢弃，下一请求恢复。
     @MainActor @Test func cancellationDiscardsOutputBeforePublication() async throws {
         let source = try #require(await PAGVideoFixtures.compositions(in: "RootLayerVideo.pag").first?.video.sequences.last)
         let (events, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (closings, closingContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let release = DispatchSemaphore(value: 0)
+        let invalidations = Mutex(0)
         defer { release.signal() }
         let store = VideoFrameStore(onEvent: { event in
             switch event {
@@ -47,8 +49,10 @@ struct VideoCancellationTests {
                 continuation.yield(())
                 // 在真实VT回调内暂停，主actor和会话清理队列都必须保持可运行。
                 release.wait()
-            case .invalidating:
+            case .waitingForDecode:
                 closingContinuation.yield(())
+            case .invalidating:
+                invalidations.withLock { $0 += 1 }
             default:
                 break
             }
@@ -65,8 +69,11 @@ struct VideoCancellationTests {
         task.cancel()
         var closingIterator = closings.makeAsyncIterator()
         _ = try #require(await closingIterator.next())
+        // 系统回调仍由信号量阻塞，真正Invalidate必须在它和Decode返回之后发生。
+        #expect(invalidations.withLock { $0 } == 0)
         release.signal()
         await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(invalidations.withLock { $0 } == 1)
         #expect(await store.retainedBytes() == 0)
         #expect(await store.retainedSequenceCount() == 0)
         #expect(await store.decodedSampleCount == 2)

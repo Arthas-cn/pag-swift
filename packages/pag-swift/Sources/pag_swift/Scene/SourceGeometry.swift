@@ -66,4 +66,6 @@ indirect enum SourceShape: Sendable {
     case gradientFill(SourceGradientFill)
     /// 与普通描边共用几何规范化，颜色独立缓存。
     case gradientStroke(SourceGradientStroke)
+    /// 只作用于当前组此前路径的裁剪；正式tag25入口在显示门禁通过前仍关闭。
+    case trimPaths(SourceTrimPaths)
 }

@@ -50,6 +50,8 @@ enum PathFlattening {
             guard stretch > 0, try matrix.hasArea() else { continue }
             let generated: [[ScenePoint]]?
             switch element {
+            case .trimmed(let value):
+                generated = try trimmedPath(value.path, tolerance: tolerance, budget: &budget)
             case .path(let path, _):
                 generated = try sourcePath(path, tolerance: tolerance / stretch, budget: &budget)
             case .ellipse(let contour):

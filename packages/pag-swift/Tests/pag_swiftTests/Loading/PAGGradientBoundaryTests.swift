@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import pag_swift
 
-/// 渐变外壳的枚举、非有限、预算、取消与尚未开放的正式入口。
+/// 渐变外壳的枚举、非有限、预算、取消与完整接入的正式入口。
 struct PAGGradientBoundaryTests {
     /// 已知但未实现的type及未知值不降级，blend/composite/fillRule按字段给出明确错误。
     @Test func unsupportedEnumsFailExplicitly() throws {
@@ -72,8 +72,8 @@ struct PAGGradientBoundaryTests {
         #expect(source.isAnimated == false && reader.remainingByteCount == 0)
     }
 
-    /// 外壳不足时未读flags；总预算精确边界及预取消都不返回部分材料，正式入口仍不消费payload。
-    @Test func budgetsCancellationAndFormalGate() async throws {
+    /// 外壳不足时未读flags；总预算和取消不返回部分材料，正式入口完整消费真实payload并计节点成本。
+    @Test func budgetsCancellationAndFormalDispatch() async throws {
         for (tag, range, shell): (UInt16, Range<Int>, Int) in [(22, 361..<390, 512), (23, 326..<359, 768)] {
             let data = try PAGFixtures.data(named: "TextAnimatorMode.pag").subdata(in: range)
             var limited = GradientFixtures.decoder(limit: shell - 1)
@@ -97,10 +97,13 @@ struct PAGGradientBoundaryTests {
             }
             var formal = GradientFixtures.decoder()
             var formalReader = PAGByteReader(data: data)
-            #expect(throws: PAGError.unsupportedFeature("shapeTag:\(tag)")) {
-                try formal.readShape(code: tag, reader: &formalReader, depth: 0)
+            let shape = try formal.readShape(code: tag, reader: &formalReader, depth: 0)
+            switch shape {
+            case .gradientFill: #expect(tag == 22)
+            case .gradientStroke: #expect(tag == 23)
+            default: Issue.record("正式分发必须保留渐变源材料，不能降级纯色")
             }
-            #expect(formal.budget.used == 256 && formalReader.position == 0)
+            #expect(formal.budget.used == cost + 256 && formalReader.remainingByteCount == 0)
         }
     }
 
@@ -112,5 +115,13 @@ struct PAGGradientBoundaryTests {
             try decoder.readGradientProperty(PropertyFlags(exists: false, isAnimated: false, hasSpatial: false), reader: &reader)
         }
         #expect(reader.position == 0 && decoder.budget.used == 0)
+    }
+
+    /// 渐变及顶层Stroke已完整读取，真实文件仍须拒绝更后面的未支持内容，不能返回残缺文件。
+    @Test(arguments: [("TextAnimatorSmooth.pag", "layerTag:70"), ("list/1.pag", "layerTag:14")])
+    func completeFilesPreserveLaterUnsupportedContent(_ name: String, _ reason: String) async throws {
+        await #expect(throws: PAGError.unsupportedFeature(reason)) {
+            try await PAGLoader().load(data: PAGFixtures.data(named: name))
+        }
     }
 }

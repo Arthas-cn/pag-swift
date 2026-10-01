@@ -23,6 +23,15 @@ extension PAGSceneDecoder {
         case 21:
             // file.h::TagCode::Stroke与codec/tags/shapes/Stroke.cpp给出字段布局，已通过完整描边显示门禁。
             return try .stroke(readStroke(reader: &reader))
+        case 22:
+            // Gradient.cpp::GradientFillTag字段、颜色编译与直接drawable已闭包；未知布局仍由读取器拒绝。
+            return try .gradientFill(readGradientFill(reader: &reader))
+        case 23:
+            // Gradient.cpp::GradientStrokeTag独立字段次序已经验证，几何与普通Stroke共用已验收的样式核心。
+            return try .gradientStroke(readGradientStroke(reader: &reader))
+        case 25:
+            // TrimPaths.cpp字段、两阶段路径作用域与直接drawable已闭包，未知模式仍明确拒绝。
+            return try .trimPaths(readTrimPaths(reader: &reader))
         default:
             throw PAGError.unsupportedFeature("shapeTag:\(code)")
         }

@@ -36,6 +36,8 @@ struct ShapeAnimationInspection {
     private(set) var generators: [[String: Any]] = []
     /// 渐变字段调查保留的有界真实载荷；不会送入正式文档或播放入口。
     private(set) var gradientPayloads: [GradientAuditPayload] = []
+    /// TrimPaths调查保留的真实子流；只建立字段证据，不把字段读取等同于整文件播放支持。
+    private(set) var trimPayloads: [TrimAuditPayload] = []
 
     /// 沿已取证的文件、矢量合成和形状图层边界进入目标标签，不扫描字节猜标签起点。
     mutating func inspect(_ data: Data) throws {
@@ -144,6 +146,9 @@ struct ShapeAnimationInspection {
                    frames: [color.keyframes.count, opacity.keyframes.count])
         case 22, 23:
             gradientPayloads.append(GradientAuditPayload(code: code, range: range, reader: reader))
+            return
+        case 25:
+            trimPayloads.append(TrimAuditPayload(range: range, reader: reader))
             return
         default:
             // 调查只负责目标标签；跳过其他已知边界不意味着播放器支持该语义。

@@ -4,7 +4,7 @@ import Testing
 
 /// 既有形状属性的真实载荷、损坏边界及正式支持范围；不以字段成功冒充整文件支持。
 struct PAGShapePropertyTests {
-    /// 全部119份真实文件的目标载荷与独立字段调查一致，包含动画组内的嵌套元素。
+    /// 原119份与新增七份渐变的目标载荷均与独立字段调查一致，包含动画组内的嵌套元素。
     @Test func allRealFieldsMatchIndependentSurvey() throws {
         let urls = try PAGFixtures.allPAGURLs()
         var counts: [String: Int] = [:]
@@ -17,8 +17,8 @@ struct PAGShapePropertyTests {
                 animatedCounts[try #require(record["tag"] as? Int), default: 0] += 1
             }
         }
-        #expect(urls.count == 119)
-        #expect(counts == ["15": 2175, "16": 20, "17": 35, "18": 4, "20": 1635])
+        #expect(urls.count == 126)
+        #expect(counts == ["15": 2182, "16": 27, "17": 35, "18": 4, "20": 1635])
         #expect(animatedCounts == [15: 54, 20: 12])
     }
 
@@ -171,9 +171,9 @@ struct PAGShapePropertyTests {
         #expect(scene.dynamicShapes != nil)
     }
 
-    /// 另外四份文件暴露下一处未支持语义，必须继续拒绝完整文件，不能因属性能读就跳过内容。
-    @Test(arguments: [("alpha2.pag", "trackMatte"), ("list/2.pag", "shapeTag:25"),
-                      ("list/8.pag", "shapeTag:24"), ("wstask_circle.pag", "shapeTag:23")])
+    /// 其余三份文件仍有未支持语义，必须拒绝完整文件，不能因属性能读就跳过内容；渐变文件另组回归。
+    @Test(arguments: [("alpha2.pag", "trackMatte"), ("list/2.pag", "layerTag:14"),
+                      ("list/8.pag", "shapeTag:24")])
     func remainingContentStillFailsExplicitly(_ name: String, _ reason: String) async throws {
         await #expect(throws: PAGError.unsupportedFeature(reason)) {
             try await PAGSceneDecoder.decode(PAGFixtures.data(named: name))

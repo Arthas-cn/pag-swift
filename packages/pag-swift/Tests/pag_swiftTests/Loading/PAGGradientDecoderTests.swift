@@ -4,7 +4,7 @@ import Testing
 
 /// 真实渐变载荷与独立原始字段探针对照；内部读取通过不代表整文件或显示已支持。
 struct PAGGradientDecoderTests {
-    /// 25个载荷的类型、默认值、每张表与颜色时间段逐项相符，并核对调查覆盖数量。
+    /// 原语料与新增七份渐变的32个载荷逐字段一致，原始表按源码排序后与生产读取结果比较。
     @Test func allRealPayloadsMatchIndependentFields() throws {
         var fills = 0, strokes = 0, tables = 0, animated = 0, radial = 0
         var files = 0
@@ -39,8 +39,8 @@ struct PAGGradientDecoderTests {
                 if gradient.kind == .radial { radial += 1 }
             }
         }
-        #expect(fills == 19 && strokes == 6 && files == 10)
-        #expect(tables == 27 && animated == 3 && radial == 11)
+        #expect(fills == 26 && strokes == 6 && files == 17)
+        #expect(tables == 34 && animated == 3 && radial == 14)
     }
 
     /// 固定真实值独立于调查探针：缺省坐标、交错表、字节alpha、非0.5中点与两段三值动画保持原值。
@@ -104,10 +104,11 @@ struct PAGGradientDecoderTests {
         for (value, table) in zip(actual, tables) {
             let alphas = try #require(table["alpha"] as? [[Int]])
             let colors = try #require(table["rgb"] as? [[Int]])
-            #expect(value.alphaStops == alphas.map {
+            // DataTypes.cpp::ReadGradientColor对两张原始表按position排序；grad_alpha真实编码并非升序。
+            #expect(value.alphaStops == alphas.sorted { $0[0] < $1[0] }.map {
                 SourceAlphaStop(position: Float($0[0]) * 0.00002, midpoint: Float($0[1]) * 0.00002, opacity: UInt8($0[2]))
             })
-            #expect(value.colorStops == colors.map {
+            #expect(value.colorStops == colors.sorted { $0[0] < $1[0] }.map {
                 SourceColorStop(position: Float($0[0]) * 0.00002, midpoint: Float($0[1]) * 0.00002,
                                 color: SceneColor(red: UInt8($0[2]), green: UInt8($0[3]), blue: UInt8($0[4])))
             })

@@ -4,25 +4,29 @@ import Foundation
 import Synchronization
 import VideoToolbox
 
-/// VT会话的局部同步桥：只允许串行解码与一次后台失效并行，不向调用方泄露会话引用。
+/// VT会话的局部同步桥：解码与一次后台失效互斥，取消只撤销接纳，不向调用方泄露会话引用。
 final class VideoSessionLifetime: @unchecked Sendable {
     /// 保护会话引用及关闭标志，锁内不能调用VT或等待队列。
     private let lock = NSLock()
-    /// 防止误用时并发提交两个压缩样本；取消不取得此锁，因此能唤醒正在解码的工作。
+    /// 解码和实际Invalidate共用的执行锁；取消回调不取锁，仅后台清理可等待在途解码退出。
     private let decoding = NSLock()
     /// 原始会话只由本桥持有，关闭工作取得强引用后在锁外失效。
     private var session: VTDecompressionSession?
     /// 一旦请求关闭就不再接受新输入，不等系统Invalidate结束才阻止提交。
     private var closing = false
-    /// 与owner分离的串行队列，避免解码阻塞时关闭工作也排在它后面。
+    /// 与owner分离的串行清理队列，系统关闭和执行锁等待都不占用MainActor。
     private let cleanup: DispatchQueue
+    /// 内部验收观察点，清理已排队并即将等待执行锁；不代表系统Invalidate已经开始。
+    private let willWaitForDecode: (@Sendable () -> Void)?
     /// 内部验收观察点，清理队列即将调用VT时通知；生产为nil，不影响状态机。
     private let willInvalidate: (@Sendable () -> Void)?
 
     /// 接管新建会话；调用者不能再用原始引用解码或失效。
-    init(session: VTDecompressionSession, cleanup: DispatchQueue, willInvalidate: (@Sendable () -> Void)? = nil) {
+    init(session: VTDecompressionSession, cleanup: DispatchQueue,
+         willWaitForDecode: (@Sendable () -> Void)? = nil, willInvalidate: (@Sendable () -> Void)? = nil) {
         self.session = session
         self.cleanup = cleanup
+        self.willWaitForDecode = willWaitForDecode
         self.willInvalidate = willInvalidate
     }
 
@@ -34,7 +38,7 @@ final class VideoSessionLifetime: @unchecked Sendable {
         guard decoding.try() else { throw PAGError.mediaFailure("concurrentVideoDecode") }
         defer { decoding.unlock() }
         guard let session = lock.withLock({ closing ? nil : self.session }) else { throw CancellationError() }
-        // 与上游HardwareDecoder::invalidateSession相同：强引用保活，VT调用不持短锁。
+        // flags=[]保证返回前完成回调；执行锁覆盖两者，强引用本身不能防止VT内部被并行销毁。
         return VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
             status, _, buffer, time, _ in
             slot.publish(status: status, buffer: buffer, time: time)
@@ -60,9 +64,13 @@ final class VideoSessionLifetime: @unchecked Sendable {
         cleanup.sync {}
     }
 
-    /// 在专用清理队列取走唯一保留引用，锁外完成系统失效，不等待MainActor。
+    /// 在专用清理队列等待Decode及同步回调退出，再取走引用失效；不持状态短锁调用系统。
     private func invalidate() {
         dispatchPrecondition(condition: .onQueue(cleanup))
+        willWaitForDecode?()
+        // 实测并行Invalidate可损坏RemoteVideoDecoder内部锁；只能在同步Decode彻底返回后销毁。
+        decoding.lock()
+        defer { decoding.unlock() }
         let previous = lock.withLock {
             let result = session
             session = nil

@@ -4,9 +4,9 @@ import Testing
 
 /// 真实渐变字段到内部颜色程序的连续性；不经过正式PAG入口，不声明整文件播放支持。
 struct GradientRealColorTests {
-    /// 25个载荷的27份关键颜色值中26份解析可用；zongyi2的真实近尾stop命中已知未定义尾部策略。
+    /// 32个载荷的34份颜色值中32份解析可用，真实精度与容量不足各一份必须保持独立分类。
     @Test func realColorValuesMatchVerifiedProgramClassification() throws {
-        var payloadCount = 0, valueCount = 0, invalidCount = 0
+        var payloadCount = 0, valueCount = 0, invalidCount = 0, textureCount = 0
         for url in try PAGFixtures.allPAGURLs() {
             var inspection = ShapeAnimationInspection()
             try inspection.inspect(Data(contentsOf: url))
@@ -17,6 +17,17 @@ struct GradientRealColorTests {
                     : decoder.readGradientStroke(reader: &reader).gradient
                 for value in [source.colors.initialValue] + source.colors.keyframes.map(\.endValue) {
                     let program = try GradientColorFixtures.compile(value)
+                    if url.lastPathComponent == "grad_alpha.pag", payload.range == 141..<250 {
+                        // 15个alpha色标与RGB合并后超出八段解析容量；真实文件不能静默丢掉透明度。
+                        guard case .requiresTexture = program.result else {
+                            Issue.record("grad_alpha必须明确保留纹理颜色程序需求")
+                            return
+                        }
+                        #expect(value.alphaStops.count == 15)
+                        textureCount += 1
+                        valueCount += 1
+                        continue
+                    }
                     if url.lastPathComponent == "zongyi2.pag", payload.range == 326..<370 {
                         // 原五色末间距near，剥末后剩三有效段且upper<1，源shader在尾部未给系数赋值。
                         guard case .invalidPrecision = program.result else {
@@ -42,6 +53,6 @@ struct GradientRealColorTests {
                 payloadCount += 1
             }
         }
-        #expect(payloadCount == 25 && valueCount == 27 && invalidCount == 1)
+        #expect(payloadCount == 32 && valueCount == 34 && invalidCount == 1 && textureCount == 1)
     }
 }

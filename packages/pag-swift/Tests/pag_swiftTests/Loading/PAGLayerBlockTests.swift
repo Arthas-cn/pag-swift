@@ -61,6 +61,24 @@ struct PAGLayerBlockTests {
         }
     }
 
+    /// Trim可直接位于ShapeLayer，其他类型必须拒绝；相邻未支持标签仍不能作为层内容读取。
+    @Test func trimRequiresShapeLayerAndDoesNotOpenAdjacentTags() throws {
+        let layer = try decodeLayer(type: 4, content: tag(25, payload: [0]))
+        guard case .shape(let elements) = layer.content, case .trimPaths(let trim) = elements.first else {
+            Issue.record("根层Trim必须保留源节点")
+            return
+        }
+        #expect(trim.end.initialValue == 100 && trim.mode == .simultaneously)
+        #expect(throws: SceneValidator.invalid("shapeInNonShapeLayer")) {
+            try decodeLayer(type: 1, content: tag(25, payload: [0]))
+        }
+        for code: UInt16 in [24, 26, 27] {
+            #expect(throws: PAGError.unsupportedFeature("layerTag:\(code)")) {
+                try decodeLayer(type: 4, content: tag(code, payload: [0]))
+            }
+        }
+    }
+
     /// 依据 LayerTag、LayerAttributes 和 Transform2D 的配置生成独立记录片段。
     private func decodeLayer(type: UInt8, attributesVersion: UInt16 = 52, content: [UInt8] = []) throws -> SourceLayer {
         // V1 无 name flag，仅一字节 flags；V2/V3 默认值仍需第二个 flags 字节。

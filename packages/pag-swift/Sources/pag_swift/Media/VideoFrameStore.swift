@@ -7,7 +7,7 @@ actor VideoFrameStore {
     nonisolated private let executor = DispatchSerialQueue(label: "pag.video", qos: .userInitiated)
     /// actor全部同步工作由该真实串行队列执行。
     nonisolated var unownedExecutor: UnownedSerialExecutor { executor.asUnownedSerialExecutor() }
-    /// 关闭可以与阻塞的decode并行；每次会话替换前会排空此队列。
+    /// 关闭工作在此等待同步decode退出后才失效；每次会话替换前排空，不让MainActor等待。
     private let cleanup = DispatchQueue(label: "pag.video.cleanup", qos: .userInitiated)
     /// 库保留的像素输入上限，不伪称包含系统不可见的解码参考帧。
     private let maximumBytes: Int
@@ -99,6 +99,7 @@ actor VideoFrameStore {
             try Task.checkCancellation()
             let observer = onEvent
             entry.session = try H264Session(sequence: sequence, cleanup: cleanup,
+                                            willWaitForDecode: { observer?(.waitingForDecode) },
                                             willInvalidate: { observer?(.invalidating) })
             entry.nextIndex = keyframe
         }
@@ -141,7 +142,9 @@ actor VideoFrameStore {
 enum VideoDecodeEvent: Sendable {
     /// VT回调已经产生输出，但同步decode尚未返回；关联值为编码索引。
     case output(index: Int)
-    /// 独立清理队列即将调用系统Invalidate，不能把此事件当成关闭完成。
+    /// 独立清理工作已排队，即将等待在途Decode退出，尚不能调用系统Invalidate。
+    case waitingForDecode
+    /// Decode及同步回调已经退出，独立清理队列即将调用Invalidate，仍不代表关闭完成。
     case invalidating
 }
 

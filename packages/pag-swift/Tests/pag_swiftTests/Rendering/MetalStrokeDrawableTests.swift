@@ -8,7 +8,7 @@ import Testing
 /// 描边与形状属性动画使用真实生产显示桥和RenderOwner，验证提交及迟到结果门禁；没有像素诊断旁路。
 @Suite(.enabled(if: MTLCreateSystemDefaultDevice() != nil, "需要可访问的主机 Metal 设备"), .timeLimit(.minutes(1)))
 struct MetalStrokeDrawableTests {
-    /// 三类形状分别验证同gate替换、预取消、GPU迟到和resize；已开放文件额外真实提交。
+    /// 每类形状分别验证同gate替换、预取消、GPU迟到和resize；已开放文件额外真实提交。
     @MainActor @Test(arguments: MetalShapeFixtureKind.allCases)
     func productionOwnerRejectsStaleShapeFrames(_ kind: MetalShapeFixtureKind) async throws {
         _ = NSApplication.shared

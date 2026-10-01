@@ -8,14 +8,25 @@ enum ShapePreparation {
         guard candidates.count <= 4 else { throw PAGError.invalidArgument("shapeReuseCandidates") }
         let before = budget.used
         try budget.reserve(count: candidates.count, stride: 16)
-        var compiler = ShapeCompiler(budget: budget, frame: frame, candidates: candidates)
+        var content = ShapeContentPreparation(budget: budget, geometryBudget: try GeometryBudget(),
+                                              frame: frame, candidates: candidates)
+        let nodes: [ShapeContentNode]
+        do {
+            nodes = try content.group(elements, matrix: .identity, depth: 0)
+        } catch {
+            // 第一遍失败也回传节点与保活成本，不能把预算恢复成调用前的值。
+            budget = content.budget
+            throw error
+        }
+        var compiler = ShapeCompiler(budget: content.budget, frame: frame, candidates: candidates, paths: content.paths)
         defer { budget = compiler.budget }
-        let root = try compiler.group(elements, matrix: .identity, opacity: 1, depth: 0)
+        let root = try compiler.group(nodes, opacity: 1, depth: 0)
         let instructions = try compiler.flatten(root.node)
         try Task.checkCancellation()
         return PreparedShapeLayer(instructions: instructions, geometries: compiler.geometries,
             geometryIndicesByPaint: compiler.geometryIndicesByPaint,
-            gradientColorizersByPaint: compiler.gradientColorizersByPaint, estimatedBytes: compiler.budget.used - before)
+            gradientColorizersByPaint: compiler.gradientColorizersByPaint,
+            trimBatchesByModifier: content.trimBatchesByModifier, estimatedBytes: compiler.budget.used - before)
     }
 
     /// 安装时完整扫描元素确定是否依赖采样帧；深度、逻辑工作与取消同样受准备期限制。
@@ -41,6 +52,8 @@ enum ShapePreparation {
                 if fill.gradient.isAnimated { result = true }
             case .gradientStroke(let stroke):
                 if stroke.isAnimated { result = true }
+            case .trimPaths(let trim):
+                if trim.isAnimated { result = true }
             case .fill(let fill):
                 if fill.isAnimated { result = true }
             case .group(let transform, let children):
@@ -61,6 +74,8 @@ private struct ShapeCompiler {
     let frame: Int64
     /// 至多四份同源旧采样，按最近到最旧顺序查找；仅在本次同步准备中持有。
     let candidates: [PreparedShapeLayer]
+    /// 第一遍完成全部modifier后的最终路径表，第二遍只读。
+    let paths: [ShapeContour]
     /// 本层已建立的几何快照，数组下标是 fill 的资源身份。
     var geometries: [ShapeGeometry] = []
     /// 所有源fill/stroke的深度优先序号，不随当前可见性改变。
@@ -71,7 +86,7 @@ private struct ShapeCompiler {
     var gradientColorizersByPaint: [Int: PreparedGradientColorizer] = [:]
 
     /// 在不超过 64 层的源组递归中累计路径；rendersContent 为假时仍交出路径但不准备无效 paint。
-    mutating func group(_ elements: [SourceShape], matrix: SceneAffine, opacity: Double,
+    mutating func group(_ elements: [ShapeContentNode], opacity: Double,
                         depth: Int, rendersContent: Bool = true) throws -> CompiledShapeGroup {
         try Task.checkCancellation()
         guard depth <= 64 else { throw PAGError.resourceLimitExceeded("maximumShapeDepth") }
@@ -83,27 +98,20 @@ private struct ShapeCompiler {
         let emitsPaint = rendersContent && opacity > 0
         for element in elements {
             try Task.checkCancellation()
-            // 求值临时变量不留在递归帧中，避免Debug下合法64层组耗尽cooperative线程栈。
-            if let contour = try contour(for: element, matrix: matrix) {
-                contours.append(contour)
-                snapshot = nil
-                continue
-            }
             switch element {
-            case .rectangle, .ellipse, .polyStar, .path:
-                // 只有空Path会落到这里；它没有增加轮廓，也不能让现有几何快照失效。
-                continue
-            case .fill, .stroke, .gradientFill, .gradientStroke:
-                // 材料和样式的大型临时值也留在非递归帧，保住原64层Debug栈边界。
-                if let draw = try paint(for: element, contours: contours, matrix: matrix,
+            case .path(let id):
+                try budget.reserve(stride: 192)
+                contours.append(paths[id])
+                snapshot = nil
+            case .paint(let source, let matrix):
+                // 原paint矩阵与最终路径分开保存，Stroke不能用Trim的identity替代逆paint变换。
+                if let draw = try paint(for: source, contours: contours, matrix: matrix,
                                         emitsPaint: emitsPaint, snapshot: &snapshot) {
                     if draw.order == .abovePrevious { above.append(draw.node) }
                     else { below.append(draw.node) }
                 }
-            case let .group(transform, children):
-                let value = try TransformEvaluation.shape(transform.value(at: frame))
-                let child = try group(children, matrix: value.matrix.following(matrix), opacity: value.opacity,
-                                      depth: depth + 1, rendersContent: emitsPaint)
+            case let .group(alpha, children):
+                let child = try group(children, opacity: alpha, depth: depth + 1, rendersContent: emitsPaint)
                 // 子组自身 alpha 为零也必须把路径交给父 fill；路径不是已经画好的像素。
                 if !child.contours.isEmpty {
                     try budget.reserve(count: child.contours.count, stride: 192)
@@ -125,42 +133,8 @@ private struct ShapeCompiler {
         return CompiledShapeGroup(contours: contours, node: .group(opacity: opacity, children: draws))
     }
 
-    /// 非递归求值一项轮廓并预付保活成本；paint/group和空Path返回nil，不改累计快照。
-    mutating func contour(for element: SourceShape, matrix: SceneAffine) throws -> ShapeContour? {
-        try Task.checkCancellation()
-        switch element {
-        case .rectangle(let source):
-            let contour = try RoundedRectangleContour.make(size: PropertyEvaluation.point(source.size, at: frame),
-                position: PropertyEvaluation.point(source.position, at: frame),
-                roundness: PropertyEvaluation.scalar(source.roundness, at: frame),
-                reversed: source.reversed, matrix: matrix)
-            try budget.reserve(stride: 192)
-            return .rectangle(contour)
-        case .ellipse(let source):
-            try budget.reserve(stride: 192)
-            return .ellipse(try EllipseContour.make(source, at: frame, matrix: matrix))
-        case .polyStar(let source):
-            try budget.reserve(stride: 192)
-            return .polyStar(try PolyStarContour.make(source, at: frame, matrix: matrix))
-        case .path(let property):
-            let path = try PropertyEvaluation.path(property, at: frame, budget: &budget)
-            // 奇异变换仍可能留下可描边中心线；只有真正没有verb的路径才能省略。
-            guard !path.verbs.isEmpty else { return nil }
-            // 采样结果和网格缓存会保活共享源路径，不能只给轮廓外壳计费。
-            try budget.reserve(stride: 192)
-            try budget.reserve(stride: path.estimatedBytes)
-            for point in path.points {
-                try Task.checkCancellation()
-                _ = try matrix.applying(to: point)
-            }
-            return .path(path, matrix: matrix)
-        case .fill, .stroke, .gradientFill, .gradientStroke, .group:
-            return nil
-        }
-    }
-
     /// 一次非递归paint求值；先跳过不可见输入，再编译材料，失败不发布半份缓存。
-    mutating func paint(for element: SourceShape, contours: [ShapeContour], matrix: SceneAffine,
+    mutating func paint(for element: ShapeSourcePaint, contours: [ShapeContour], matrix: SceneAffine,
                         emitsPaint: Bool, snapshot: inout Int?) throws -> (node: ShapeDrawNode, order: ShapeCompositeOrder)? {
         let ordinal = try advancePaint()
         guard emitsPaint, !contours.isEmpty else { return nil }
@@ -199,8 +173,6 @@ private struct ShapeCompiler {
             material = .gradient(try gradient(source.gradient, ordinal: ordinal, matrix: matrix))
             order = source.compositeOrder
             stroke = try ShapeStroke(style: style, matrix: matrix)
-        default:
-            throw SceneValidator.invalid("unexpectedShapePaint")
         }
         let geometryIndex: Int
         if let stroke {
@@ -257,7 +229,7 @@ private struct ShapeCompiler {
         try budget.reserve(count: contours.count, stride: 192)
         for contour in contours {
             try Task.checkCancellation()
-            if case .path(let path, _) = contour { try budget.reserve(stride: path.estimatedBytes) }
+            try budget.reserve(stride: contour.referencedBytes)
         }
         if let stroke {
             try budget.reserve(stride: 256)

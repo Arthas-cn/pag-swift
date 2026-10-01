@@ -75,7 +75,9 @@ final class DisplayTargetBox: @unchecked Sendable {
         layer.device = device
         layer.framebufferOnly = true
         layer.pixelFormat = .bgra8Unorm
-        layer.maximumDrawableCount = 2
+        // 保留系统默认三张交换容量；本次真机验收的两张池在重挂后快速暂停留下旧帧，详见P7呈现回归。
+        // 交换池不增加本库活动提交数量，也不改变直接drawable与GPU完成后释放输入的规则。
+        layer.maximumDrawableCount = 3
         layer.allowsNextDrawableTimeout = true
         layer.presentsWithTransaction = false
         layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
