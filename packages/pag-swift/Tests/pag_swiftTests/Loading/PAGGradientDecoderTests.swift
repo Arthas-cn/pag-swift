@@ -120,7 +120,8 @@ struct PAGGradientDecoderTests {
         for (frame, kind) in zip(gradient.colors.keyframes, kinds) {
             switch frame.easing {
             case .hold: #expect(kind == 3)
-            case .linear: #expect(kind <= 1)
+            case .none: #expect(kind == 0)
+            case .linear: #expect(kind == 1)
             case .bezier(_, let second): #expect(kind == 2 && second == nil)
             }
         }

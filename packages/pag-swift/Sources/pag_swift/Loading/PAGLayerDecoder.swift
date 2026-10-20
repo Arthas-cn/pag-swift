@@ -66,35 +66,6 @@ extension PAGSceneDecoder {
                            markers: markers, timing: attributes.timing, imageFillRule: imageFillRule)
     }
 
-    /// 按MarkerTag.cpp读取完整标记列表；重复tag按源码追加，非空备注是Layer::verifyExtra的不变量。
-    mutating func readMarkers(reader: inout PAGByteReader) throws -> [SourceMarker] {
-        let count = Int(try reader.readEncodedUInt32())
-        // 每条至少有起点、一个非零备注字节和结束符；额外连续旗标先按整字节上界保留。
-        guard count <= reader.remainingByteCount / 3,
-              (count + 7) / 8 <= reader.remainingByteCount - count * 3 else {
-            throw PAGError.truncatedData(offset: reader.position)
-        }
-        try budget.reserve(count: count, stride: 128)
-        var durations: [Bool] = []
-        // 所有时长旗标连续编码，不能读完一条旗标就对齐并读取该条记录。
-        for _ in 0..<count {
-            try Task.checkCancellation()
-            durations.append(try reader.readUnsignedBits(count: 1) != 0)
-        }
-        reader.alignToByte()
-        var markers: [SourceMarker] = []
-        for hasDuration in durations {
-            try Task.checkCancellation()
-            let start = try StaticAttributes.frame(from: &reader)
-            let duration = try hasDuration ? StaticAttributes.frame(from: &reader) : 0
-            let comment = try reader.readUTF8String()
-            guard !comment.isEmpty else { throw SceneValidator.invalid("emptyMarkerComment") }
-            try budget.reserve(comment.utf8.count)
-            markers.append(SourceMarker(startFrame: start, durationFrames: duration, comment: comment))
-        }
-        return markers
-    }
-
     /// 读取LayerAttributes三个版本，保留完整层时间元数据；尚未支持的画面语义仍拒绝。
     mutating func readLayerAttributes(code: UInt16, reader: inout PAGByteReader) throws -> LayerAttributes {
         try Task.checkCancellation()

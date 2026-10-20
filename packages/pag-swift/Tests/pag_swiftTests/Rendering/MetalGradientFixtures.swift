@@ -24,7 +24,7 @@ enum MetalGradientFixtures {
                          .init(position: 1, midpoint: 0.5, color: GradientColorFixtures.blue)])
     }
 
-    /// 两个相同渐变的重叠矩形整体淡出；相同位置颜色相同，重叠alpha不能重复乘或叠加。
+    /// 两个相同渐变的矩形分别继承淡出alpha；重叠颜色比例相同而总alpha按SrcOver增加。
     static func groupOpacity() throws -> [SourceShape] {
         let source = material()
         let children: [SourceShape] = [40.0, 60.0].map { center in

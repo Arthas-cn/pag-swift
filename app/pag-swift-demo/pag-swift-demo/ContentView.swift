@@ -69,6 +69,7 @@ struct ContentView: View {
                     Text("视频多分辨率").tag("data_video.pag")
                     Text("透明粒子视频").tag("particle_video.pag")
                     Text("图片与视频合成").tag("2")
+                    Text("含音频元数据 TZ2").tag("TZ2.pag")
                 }
                 Toggle("替换全部可编辑图片", isOn: $replacesImages)
                 HStack {

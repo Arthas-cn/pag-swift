@@ -207,7 +207,7 @@ private struct FramePlanBuilder {
                                       opacity: opacity, contentTime: sampleTime)))
     }
 
-    /// 静态直接引用，动态按源合成帧取有界缓存；整体图层alpha与内部组/填充保持独立边界。
+    /// 静态直接引用，动态按源合成帧取缓存；内部组逐draw继承alpha，与外层图层边界分开。
     private mutating func shape(instance: LayerInstance, frame: Int64, matrix: SceneAffine, opacity: Double) async throws {
         let reference = SourceLayerReference(composition: instance.compositionIndex, layer: instance.layerIndex)
         let prepared: PreparedShapeLayer
@@ -235,7 +235,7 @@ private struct FramePlanBuilder {
             try Task.checkCancellation()
             switch instruction {
             case .beginOpacityGroup(let alpha):
-                try append(.beginOpacityGroup(FrameOpacityGroup(layerID: instance.id, opacity: alpha)))
+                try append(.beginOpacityGroup(FrameOpacityGroup(layerID: instance.id, opacity: alpha, application: .perDraw)))
             case .endOpacityGroup:
                 try append(.endOpacityGroup)
             case .fill(let paint):

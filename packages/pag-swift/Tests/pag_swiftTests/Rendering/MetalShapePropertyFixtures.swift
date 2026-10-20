@@ -10,7 +10,7 @@ enum MetalShapePropertyFixtures {
             opacity: try ShapePropertyFixtures.track(UInt8(128), UInt8(255)))]
     }
 
-    /// 两个相交子组共同从不透明淡出，交叉必须只应用一次外组alpha，零时清空旧画面。
+    /// 两个相交子组各自继承外组淡出alpha，重叠按SrcOver累计，零时清空旧画面。
     static func groupOpacity() throws -> [SourceShape] {
         let red: [SourceShape] = [ShapePropertyFixtures.rectangle(size: .init(constant: ScenePoint(x: 30, y: 30)),
             position: .init(constant: ScenePoint(x: 35, y: 35))), ShapePropertyFixtures.fill()]

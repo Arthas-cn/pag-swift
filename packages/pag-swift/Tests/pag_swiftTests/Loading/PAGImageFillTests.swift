@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import pag_swift
 
-/// 图片素材规则的真实字段与版本差异，不把AudioMarker中尚未支持的音频语义当作已播放。
+/// 图片素材规则的真实字段与版本差异；音频元数据不改变图片素材时钟。
 struct PAGImageFillTests {
     /// 真实54保存三段帧值并把Hold修为Linear；相同布局按67读取时仍为Hold。
     @Test func realPayloadPreservesFrameValuesAndVersionSemantics() throws {
@@ -32,7 +32,7 @@ struct PAGImageFillTests {
         #expect(layer.id == 329 && layer.content.kind == .image)
         #expect(layer.imageFillRule?.timeRemap.keyframes.count == 3)
         #expect(!layer.markers.isEmpty)
-        // 完整层不是完整文档；同文件compositionTag:55仍由下方用例确认失败。
+        // 完整层不是完整文档；下方确认完整文件仍因后续真实蒙版而失败。
         #expect(layer.startFrame == 0 && layer.durationFrames == 500)
         guard case .image(187) = layer.content else {
             Issue.record("真实图片引用必须为187")
@@ -69,7 +69,7 @@ struct PAGImageFillTests {
         for count in 7..<bytes.count { #expect(throws: PAGError.self) { try decode(Array(bytes.prefix(count))) } }
     }
 
-    /// 实际载荷截断、空计数、尾随、超预算和取消都不返回规则；原文件仍受音频门禁约束。
+    /// 损坏、超预算和取消都不返回规则；完整文件越过音频后仍拒绝尚未支持的蒙版。
     @Test func damageBudgetCancellationAndFullFileGate() async throws {
         let data = try PAGFixtures.data(named: "AudioMarker.pag")
         let bytes = Array(data[1_971_301..<1_971_319])
@@ -82,7 +82,7 @@ struct PAGImageFillTests {
             #expect(throws: CancellationError.self) { try decode(bytes) }
         }
         await task.value
-        await #expect(throws: PAGError.unsupportedFeature("compositionTag:55")) { try await PAGLoader().load(data: data) }
+        await #expect(throws: PAGError.unsupportedFeature("layerTag:14")) { try await PAGLoader().load(data: data) }
     }
 
     /// 只把独立字段交给真实读取入口，预算与错误保持生产语义。

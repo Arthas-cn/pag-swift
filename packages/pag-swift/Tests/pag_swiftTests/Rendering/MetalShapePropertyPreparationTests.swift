@@ -5,7 +5,7 @@ import Testing
 /// 新形状轨道的实际GPU输入复用；不把CPU几何身份当作三个Metal buffer都命中的证明。
 @Suite(.enabled(if: MTLCreateSystemDefaultDevice() != nil, "需要可访问的主机 Metal 设备"))
 struct MetalShapePropertyPreparationTests {
-    /// Ellipse与PolyStar的颜色复用三个GPU buffer，几何/拓扑变化失效；整体alpha仍只用局部附件。
+    /// Ellipse与PolyStar颜色复用三个GPU buffer，几何/拓扑变化失效；内部组alpha不创建附件。
     @Test func generatorFramesReuseOnlyMatchingGPUInputs() async throws {
         let owner = ShapePropertyGPUOwner(device: try #require(MTLCreateSystemDefaultDevice()))
         for (elements, changesGeometry, hasOpacityGroup) in [
@@ -24,7 +24,7 @@ struct MetalShapePropertyPreparationTests {
         }
     }
 
-    /// 颜色和组alpha保持几何输入，位置与矩形变化替换输入；透明组的局部附件最终直接合成到drawable。
+    /// 颜色和继承alpha保持几何输入，位置与矩形变化替换输入；内容始终直接进入drawable pass。
     @Test func sourceFramesReuseOnlyMatchingGPUInputs() async throws {
         let owner = ShapePropertyGPUOwner(device: try #require(MTLCreateSystemDefaultDevice()))
         for (elements, changesGeometry, hasOpacityGroup) in [
@@ -61,7 +61,7 @@ private actor ShapePropertyGPUOwner {
         let restored = try MetalFramePreparation.prepare(returned, width: 100, height: 100, resources: resources)
         defer { restored.releaseTransients() }
         #expect(before.passes.last?.attachment == nil && after.passes.last?.attachment == nil && restored.passes.last?.attachment == nil)
-        #expect(after.passes.count == (hasOpacityGroup ? 2 : 1))
+        #expect(after.passes.count == 1 && after.loans.isEmpty)
         let a = before.passes.flatMap(\.draws).filter { $0.texture == nil }
         let b = after.passes.flatMap(\.draws).filter { $0.texture == nil }
         let c = restored.passes.flatMap(\.draws).filter { $0.texture == nil }
@@ -75,9 +75,8 @@ private actor ShapePropertyGPUOwner {
             #expect(old === original && old.buffer === original.buffer && old.nodes === original.nodes && old.triangles === original.triangles)
         }
         if hasOpacityGroup {
-            let local = after.passes[0]
-            #expect(local.rect.width < 100 && local.rect.height < 100)
-            #expect(after.passes[1].draws.first?.texture === local.attachment?.texture)
+            #expect(b.count == 2)
+            #expect(b.allSatisfy { abs($0.uniforms.color.w - Float(127.0 / 255)) < 1e-6 })
         }
         after.releaseTransients()
         #expect(resources.groups.activeBytes == 0)

@@ -98,12 +98,14 @@ struct MetalGradientPixelTests {
         }
     }
 
-    /// 局部组附件只乘一次整体alpha；反向dash只改变覆盖，宽度动画不改变渐变方向。
+    /// Shape内部组逐draw继承alpha；反向dash只改变覆盖，宽度动画不改变渐变方向。
     private func verifyGroupsAndStrokes(_ owner: MetalStrokePixelOwner, _ target: MetalStrokePixelTarget) async throws {
         let opacity = try await MetalStrokeFixtures.scene(MetalGradientFixtures.groupOpacity())
         for frame: Int64 in [0, 5, 10, 0] {
             let alpha = frame == 5 ? 127.0 / 255 : frame == 10 ? 0 : 1
-            let expected = [5.0 / 60, 0.5, 55.0 / 60].map { rgba(1 - $0, 0, $0, alpha: alpha) } + [.zero]
+            let expected = [rgba(1 - 5.0 / 60, 0, 5.0 / 60, alpha: alpha),
+                rgba(0.5, 0, 0.5, alpha: 2 * alpha - alpha * alpha),
+                rgba(1 - 55.0 / 60, 0, 55.0 / 60, alpha: alpha), .zero]
             expect(try await owner.pixels(ShapePathFixtures.plan(opacity, at: frame), target: target,
                 at: [SIMD2(25, 50), SIMD2(50, 50), SIMD2(75, 50), SIMD2(5, 5)]), expected)
         }

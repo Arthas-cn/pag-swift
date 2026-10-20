@@ -120,20 +120,39 @@ struct PAGByteReader: Sendable {
         Int(try readUnsignedBits(count: 5)) + 1
     }
 
-    /// 读取以零字节结束的完整 UTF-8 字符串；非法编码或缺少结束字节时失败。
+    /// 读取以零字节结束的完整UTF-8字符串；由调用方预留整体输入空间，非法编码或缺少结束符时失败。
     mutating func readUTF8String() throws -> String {
+        try consumeUTF8String(in: utf8StringRange())
+    }
+
+    /// 先扫描范围并预付备注成本，再构造字符串；预算不足时游标仍停在字符串起点。
+    mutating func readUTF8String(budget: inout DecodeBudget) throws -> String {
+        let range = try utf8StringRange()
+        try budget.reserve(range.count)
+        return try consumeUTF8String(in: range)
+    }
+
+    /// 只定位有界零终止范围，不移动游标或分配字符串；长串扫描周期检查取消。
+    private func utf8StringRange() throws -> Range<Int> {
         let start = position
         var end = start
-        // 上游 readUTF8String 使用有界零终止串；长字符串的扫描也必须响应取消。
+        // 上游readUTF8String使用有界零终止串；扫描和后续复制都要保留取消机会。
         while end < upperBound, bytes[end] != 0 {
             if (end - start).isMultiple(of: 4096) { try Task.checkCancellation() }
             end += 1
         }
         guard end < upperBound else { throw PAGError.truncatedData(offset: upperBound) }
-        guard let value = String(bytes: bytes[start..<end], encoding: .utf8) else {
-            throw PAGError.invalidFile(reason: "invalidUTF8", offset: start)
+        return start..<end
+    }
+
+    /// 从已扫描并由调用者计费的范围构造UTF-8值；校验或取消失败不移动游标。
+    private mutating func consumeUTF8String(in range: Range<Int>) throws -> String {
+        try Task.checkCancellation()
+        guard let value = String(bytes: bytes[range], encoding: .utf8) else {
+            throw PAGError.invalidFile(reason: "invalidUTF8", offset: range.lowerBound)
         }
-        cursor = end + 1
+        try Task.checkCancellation()
+        cursor = range.upperBound + 1
         bitOffset = 0
         return value
     }

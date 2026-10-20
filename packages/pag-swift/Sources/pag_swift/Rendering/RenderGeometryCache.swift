@@ -4,12 +4,15 @@ enum RenderGeometrySource: Sendable {
     case shape(ShapeGeometry)
     /// 已经提取的单个填充或描边字形轮廓。
     case glyph(GlyphOutline)
+    /// 普通蒙版的有限nonzero路径；反向标记由显示作用域持有，不进入几何缓存键。
+    case mask(SourcePath)
 
     /// 仅当来源对象仍被保活时有效的身份，不使用内容摘要重新遍历整条路径。
     var identity: ObjectIdentifier {
         switch self {
         case let .shape(value): ObjectIdentifier(value)
         case let .glyph(value): ObjectIdentifier(value)
+        case let .mask(value): ObjectIdentifier(value)
         }
     }
 
@@ -19,6 +22,7 @@ enum RenderGeometrySource: Sendable {
         let stride: Int
         switch self {
         case let .shape(value): return value.estimatedBytes
+        case let .mask(value): return value.estimatedBytes
         case let .glyph(value): count = value.elements.count; stride = 128
         }
         let array = count.multipliedReportingOverflow(by: stride)
@@ -32,6 +36,7 @@ enum RenderGeometrySource: Sendable {
         switch self {
         case let .shape(value): contours = try PathFlattening.shape(value, tolerance: precision.tolerance, budget: &budget)
         case let .glyph(value): contours = try PathFlattening.glyph(value, tolerance: precision.tolerance, budget: &budget)
+        case let .mask(value): contours = try PathFlattening.sourcePath(value, tolerance: precision.tolerance, budget: &budget)
         }
         try budget.reserve(stride: 128)
         return try NonzeroTessellation.prepare(contours, budget: &budget)

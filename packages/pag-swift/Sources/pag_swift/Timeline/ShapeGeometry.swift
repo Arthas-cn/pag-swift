@@ -125,7 +125,7 @@ struct ShapePaint: Sendable {
 
 /// 已按真实覆盖顺序排列的单次形状采样指令；只保留影响画面的组边界。
 enum ShapeInstruction: Sendable {
-    /// 进入不带裁剪的整体透明度组，关联值范围为 0..<1。
+    /// 进入不带裁剪的逐draw透明度组，关联值范围为0..<1，不隔离重叠paint。
     case beginOpacityGroup(Double)
     /// 结束最近一次形状透明度组。
     case endOpacityGroup
@@ -135,7 +135,7 @@ enum ShapeInstruction: Sendable {
 
 /// 一份源形状图层的不可变采样结果；静态时刻共享，动态时按源帧缓存。
 final class PreparedShapeLayer: Sendable {
-    /// 真实绘制顺序，已经处理Below/Above以及子组整体alpha边界。
+    /// 真实绘制顺序，已经处理Below/Above以及子组继承alpha边界。
     let instructions: [ShapeInstruction]
     /// 被 fill 引用的几何快照，每个对象只在后台准备阶段构造一次。
     let geometries: [ShapeGeometry]

@@ -37,7 +37,8 @@ struct MetalStrokePixelTests {
             let group = try await MetalStrokeFixtures.scene(MetalStrokeFixtures.mixedGroup())
             let grouped = try await owner.pixels(ShapePathFixtures.plan(group, at: 0), target: target,
                 at: [SIMD2(16, 40), SIMD2(20, 40), SIMD2(40, 40), SIMD2(5, 5)])
-            expect(grouped, [SIMD4(128, 0, 0, 128), SIMD4(0, 0, 128, 128), SIMD4(0, 128, 0, 128), .zero])
+            // 绿→红→蓝各继承a=128/255；红只被蓝覆盖一次为a(1-a)，绿被两次覆盖为a(1-a)²。
+            expect(grouped, [SIMD4(128, 0, 0, 128), SIMD4(64, 32, 128, 224), SIMD4(0, 128, 0, 128), .zero])
 
             let color = try await MetalStrokeFixtures.scene(MetalStrokeFixtures.animatedColor())
             for frame: Int64 in [0, 10, 0] {
@@ -63,7 +64,7 @@ struct MetalStrokePixelTests {
     private func expect(_ actual: [SIMD4<UInt8>], _ expected: [SIMD4<UInt8>]) {
         #expect(actual.count == expected.count)
         for (a, b) in zip(actual, expected) {
-            for channel in 0..<4 { #expect(abs(Int(a[channel]) - Int(b[channel])) <= 1) }
+            for channel in 0..<4 { #expect(abs(Int(a[channel]) - Int(b[channel])) <= 1, "RGBA实际\(a)，期望\(b)") }
         }
     }
 }

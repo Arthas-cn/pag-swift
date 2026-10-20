@@ -114,14 +114,16 @@ struct MetalTrimPixelTests {
         }
     }
 
-    /// 两个重叠子paint受父Trim与单次组alpha影响，交叉不能二次叠加alpha或遗留上一帧。
+    /// 两个重叠子paint受父Trim及继承alpha影响，交叉按两次SrcOver累计，往返不能遗留上一帧。
     private func groups(_ owner: MetalStrokePixelOwner, _ target: MetalStrokePixelTarget) async throws {
         let scene = try await MetalStrokeFixtures.scene(MetalTrimFixtures.groupOpacity())
         for frame: Int64 in [0, 5, 10, 0] {
             let alpha: UInt8 = frame == 5 ? 127 : frame == 10 ? 0 : 255
             let color = SIMD4<UInt8>(alpha, 0, 0, alpha)
+            let overlapAlpha = UInt8((Double(alpha) * (2 - Double(alpha) / 255)).rounded())
+            let overlap = SIMD4<UInt8>(overlapAlpha, 0, 0, overlapAlpha)
             expect(try await owner.pixels(ShapePathFixtures.plan(scene, at: frame), target: target,
-                at: [SIMD2(25, 25), SIMD2(40, 25), SIMD2(60, 25), SIMD2(15, 50)]), [color, color, color, .zero])
+                at: [SIMD2(25, 25), SIMD2(40, 25), SIMD2(60, 25), SIMD2(15, 50)]), [color, overlap, color, .zero])
         }
     }
 

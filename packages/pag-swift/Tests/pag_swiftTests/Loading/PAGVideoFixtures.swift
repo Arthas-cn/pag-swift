@@ -9,15 +9,15 @@ enum PAGVideoFixtures {
         let value = try #require(await compositions(in: name).first)
         return SourceComposition(id: value.id, size: value.attributes.size, durationFrames: value.attributes.duration,
                                  frameRate: value.attributes.frameRate, background: value.attributes.background,
-                                 layers: [], video: value.video)
+                                 layers: [], video: value.video, audio: value.audio, audioMarkers: value.audioMarkers)
     }
 
     /// 验证容器后逐个读取完整video合成；返回值只供测试，未知video内标签仍按生产读取器失败。
     @concurrent static func compositions(in name: String) async throws
-        -> [(id: UInt32, attributes: CompositionAttributes, video: SourceVideoComposition)] {
+        -> [(id: UInt32, attributes: CompositionAttributes, video: SourceVideoComposition, audio: SourceAudio?, audioMarkers: [SourceMarker])] {
         let data = try PAGFixtures.data(named: name)
         let inspection = try await PAGContainerInspector.inspect(data)
-        var values: [(id: UInt32, attributes: CompositionAttributes, video: SourceVideoComposition)] = []
+        var values: [(id: UInt32, attributes: CompositionAttributes, video: SourceVideoComposition, audio: SourceAudio?, audioMarkers: [SourceMarker])] = []
         var decoder = PAGSceneDecoder(limits: .standard, budget: DecodeBudget(limit: PAGLoadLimits.standard.maximumDecodedBytes))
         for tag in inspection.tags where tag.code == 50 {
             var reader = PAGByteReader(data: data)

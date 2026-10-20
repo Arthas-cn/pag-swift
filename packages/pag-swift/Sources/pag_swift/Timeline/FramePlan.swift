@@ -74,12 +74,29 @@ struct FrameVideo: Sendable {
     let opacity: Double
 }
 
-/// 不带额外裁剪的整体透明度边界，用于形状/文本层和 shape group。
+/// 无额外裁剪的透明度如何被消费；普通Shape组与已组合内容不能混为一种附件语义。
+enum FrameOpacityApplication: Sendable {
+    /// 继承到每次实际绘制，普通Shape内部组不为自身创建颜色附件。
+    case perDraw
+    /// 作用于已组合内容一次；图层/预合成的具体快照资格仍由后续合同进一步限定。
+    case composite
+}
+
+/// 不带额外裁剪的透明度边界；application区分继承和内容组合。
 struct FrameOpacityGroup: Sendable {
     /// 对应的图层实例，多个内部组可以属于同一层。
     let layerID: PAGLayerID
-    /// 此组的整体不透明度，不应预乘到每个内部 fill，范围 0...1。
+    /// 此作用域的不透明度，范围0...1；消费位置由application决定。
     let opacity: Double
+    /// 普通Shape内部组为perDraw，现有图层边界暂保留composite。
+    let application: FrameOpacityApplication
+
+    /// 保存透明度及明确的消费方式；默认值仅保留现有图层边界，不用于推断Shape内部组。
+    init(layerID: PAGLayerID, opacity: Double, application: FrameOpacityApplication = .composite) {
+        self.layerID = layerID
+        self.opacity = opacity
+        self.application = application
+    }
 }
 
 /// 一次 nonzero 复合路径填充，资源中的全部轮廓共同决定覆盖区域。
@@ -120,7 +137,7 @@ enum FrameCommand: Sendable {
     case image(FrameImage)
     /// 直接采样已硬解的视频两平面，不能先转换为整帧RGBA纹理。
     case video(FrameVideo)
-    /// 进入不附加裁剪的整体透明度组，通常只为 alpha 不等于 1 的内容生成。
+    /// 进入不附加裁剪的透明度作用域，消费方式由关联值指定。
     case beginOpacityGroup(FrameOpacityGroup)
     /// 结束最近一次 beginOpacityGroup，不退出所属合成的矩形裁剪。
     case endOpacityGroup

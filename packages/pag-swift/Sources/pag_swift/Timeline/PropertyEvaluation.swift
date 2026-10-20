@@ -67,11 +67,11 @@ enum PropertyEvaluation {
         return try interpolate(keyframe, progress)
     }
 
-    /// 二维第二分量可选独立曲线；单缓动 Point 的两个分量共用 first。
+    /// None与Linear共享数值进度；二维第二分量可选独立曲线，单缓动Point共用first。
     static func eased(_ progress: Float, by easing: SourceEasing, secondDimension: Bool) -> Float {
         switch easing {
         case .hold: 0
-        case .linear: progress
+        case .none, .linear: progress
         case .bezier(let first, let second): (secondDimension ? (second ?? first) : first).timing(at: progress)
         }
     }

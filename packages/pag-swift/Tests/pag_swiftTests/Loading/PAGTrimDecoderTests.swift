@@ -83,7 +83,8 @@ struct PAGTrimDecoderTests {
             #expect(frame.startValue == raw.values[index] && frame.endValue == raw.values[index + 1])
             #expect(frame.spatialCurve == nil)
             switch frame.easing {
-            case .linear: #expect(raw.kinds[index] <= 1)
+            case .none: #expect(raw.kinds[index] == 0)
+            case .linear: #expect(raw.kinds[index] == 1)
             case .hold: #expect(raw.kinds[index] == 3)
             case .bezier(_, let second): #expect(raw.kinds[index] == 2 && second == nil)
             }

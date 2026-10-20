@@ -57,7 +57,8 @@ struct PAGSceneDecoder {
                 let value = try decoder.readVideoComposition(reader: &block.reader)
                 compositions.append(SourceComposition(id: value.id, size: value.attributes.size,
                     durationFrames: value.attributes.duration, frameRate: value.attributes.frameRate,
-                    background: value.attributes.background, layers: [], video: value.video))
+                    background: value.attributes.background, layers: [], video: value.video,
+                    audio: value.audio, audioMarkers: value.audioMarkers))
             case 31:
                 guard !hasMetadata else { throw PAGError.invalidFile(reason: "duplicateFileAttributes", offset: nil) }
                 hasMetadata = true
@@ -90,12 +91,14 @@ struct PAGSceneDecoder {
     }
 
     /// 按 Vector/BitmapCompositionTag 读取 ID 和标签；共同属性必须恰好一次，内容不可混用。
-    private mutating func readComposition(reader: inout PAGByteReader, isBitmap: Bool) throws -> SourceComposition {
+    mutating func readComposition(reader: inout PAGByteReader, isBitmap: Bool) throws -> SourceComposition {
         try budget.reserve(512)
         let id = try reader.readEncodedUInt32()
         var attributes: CompositionAttributes?
         var layers: [SourceLayer] = []
         var sequences: [SourceBitmapSequence] = []
+        var audio: SourceAudio?
+        var markers: [SourceMarker] = []
         while var block = try nextBlock(from: &reader) {
             switch block.code {
             case 3:
@@ -103,6 +106,8 @@ struct PAGSceneDecoder {
                 attributes = try readCompositionAttributes(reader: &block.reader)
             case 5 where !isBitmap:
                 layers.append(try readLayer(reader: &block.reader))
+            case 53, 55:
+                _ = try readCompositionMetadata(code: block.code, reader: &block.reader, audio: &audio, markers: &markers)
             case 46 where isBitmap:
                 sequences.append(try readBitmapSequence(reader: &block.reader))
             default:
@@ -113,7 +118,8 @@ struct PAGSceneDecoder {
         guard let attributes else { throw PAGError.invalidFile(reason: "missingCompositionAttributes", offset: nil) }
         let bitmap = try isBitmap ? SourceBitmapComposition(sequences: sequences, frameRate: attributes.frameRate) : nil
         return SourceComposition(id: id, size: attributes.size, durationFrames: attributes.duration,
-                                 frameRate: attributes.frameRate, background: attributes.background, layers: layers, bitmap: bitmap)
+                                 frameRate: attributes.frameRate, background: attributes.background, layers: layers, bitmap: bitmap,
+                                 audio: audio, audioMarkers: markers)
     }
 
     /// 按 CompositionAttributes.cpp 固定字段顺序读取；这些字段没有属性 flags。

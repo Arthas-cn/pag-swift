@@ -92,13 +92,13 @@ struct SourceLayerTiming: Sendable {
                                            timeRemap: SourceProperty(constant: 0))
 }
 
-/// 图层标记的只读元数据，不负责播放、事件派发或音频同步。
+/// 图层或合成标记的只读元数据，不负责播放、事件派发或音频同步。
 struct SourceMarker: Sendable {
     /// ReadTime得到的源帧起点，尚未换算成公开微秒。
     let startFrame: Int64
     /// ReadTime得到的源帧时长，字段缺省为0；不拿它定义层的可见区间。
     let durationFrames: Int64
-    /// 上游verifyExtra要求非空的UTF-8备注。
+    /// UTF-8备注；Layer::verifyExtra要求图层非空，合成允许空串。
     let comment: String
 }
 
@@ -121,9 +121,15 @@ struct SourceComposition: Sendable {
     /// PAG内嵌H.264序列；与bitmap及非空layers互斥，nil表示没有video内容。
     let video: SourceVideoComposition?
 
-    /// 保存共同属性与一种内容，互斥性由SceneValidator校验；序列合成的直接子层集合为空。
+    /// 合成原始音频元数据；nil表示没有tag55，不参与画面时间或媒体采样。
+    let audio: SourceAudio?
+    /// 合成音频标记，允许空备注且不依赖audio存在；按编码顺序保存。
+    let audioMarkers: [SourceMarker]
+
+    /// 保存共同属性、音频元数据与一种画面内容；序列合成的直接子层集合为空。
     init(id: UInt32, size: PAGSize, durationFrames: Int64, frameRate: Double, background: SceneColor,
-         layers: [SourceLayer], bitmap: SourceBitmapComposition? = nil, video: SourceVideoComposition? = nil) {
+         layers: [SourceLayer], bitmap: SourceBitmapComposition? = nil, video: SourceVideoComposition? = nil,
+         audio: SourceAudio? = nil, audioMarkers: [SourceMarker] = []) {
         self.id = id
         self.size = size
         self.durationFrames = durationFrames
@@ -132,5 +138,7 @@ struct SourceComposition: Sendable {
         self.layers = layers
         self.bitmap = bitmap
         self.video = video
+        self.audio = audio
+        self.audioMarkers = audioMarkers
     }
 }

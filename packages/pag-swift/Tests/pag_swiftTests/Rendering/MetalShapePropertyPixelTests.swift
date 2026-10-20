@@ -7,7 +7,7 @@ import Testing
 /// 新形状属性在真实显示drawable上的像素验收；读取诊断只在Tests，生产仍直接显示且不读回。
 @Suite(.enabled(if: MTLCreateSystemDefaultDevice() != nil, "需要可访问的主机 Metal 设备"), .timeLimit(.minutes(1)))
 struct MetalShapePropertyPixelTests {
-    /// 颜色/alpha、交叉整体alpha、透明穿零、组位置和矩形尺寸/圆角往返符合独立坐标和RGBA预期。
+    /// 颜色/alpha、逐draw组透明度、透明穿零、组位置和矩形尺寸/圆角往返符合独立RGBA预期。
     @MainActor @Test func verifiesAnimatedPropertiesOnMountedDrawable() async throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 160, y: 140, width: 100, height: 100),
@@ -44,8 +44,10 @@ struct MetalShapePropertyPixelTests {
                 let alpha: UInt8 = frame == 0 ? 255 : frame == 5 ? 127 : 0
                 let pixels = try await owner.pixels(ShapePathFixtures.plan(opacity, at: frame), target: target,
                     at: [SIMD2(25, 35), SIMD2(40, 35), SIMD2(60, 35), SIMD2(5, 5)])
-                // 重叠处和红色单臂alpha相同；不能在两个子组各乘alpha后再叠加。
-                expect(pixels, [SIMD4(alpha, 0, 0, alpha), SIMD4(alpha, 0, 0, alpha), SIMD4(0, 0, alpha, alpha), .zero])
+                // 源MakeBlend让两个paint分别乘alpha；蓝先画、红后覆盖，背景残留a(1-a)，总覆盖2a-a²。
+                let remaining = UInt8((Double(alpha) * (1 - Double(alpha) / 255)).rounded())
+                let overlap = SIMD4(alpha, 0, remaining, alpha + remaining)
+                expect(pixels, [SIMD4(alpha, 0, 0, alpha), overlap, SIMD4(0, 0, alpha, alpha), .zero])
             }
             let moving = try await MetalStrokeFixtures.scene(MetalShapePropertyFixtures.movingGroup())
             let rectangle = try await MetalStrokeFixtures.scene(MetalShapePropertyFixtures.rectangle())

@@ -64,13 +64,18 @@ import pag_swift
     /// 两个已有播放器，不在验收中重新创建播放核心。
     private var players: [PAGPlayer] { [swiftUIPlayer, nativePlayer] }
 
-    /// 验证实际刷新能从请求位置推进，而非只进入名为playing的状态。
+    /// 验证实际刷新呈现了后续帧，包含短动画从末帧跨轮回到起点的情况。
     private func playBoth() async throws {
         for player in players {
-            let previous = await player.snapshot.presentedTime ?? .zero
+            let previous = await player.snapshot
             try await player.play()
             _ = try await wait(player, "自动推进") { snapshot in
-                snapshot.state == .playing && snapshot.presentedTime.map { $0 > previous } == true
+                // 末帧之后只能跨轮回到较小时间；同时要求呈现时间改变，不能仅凭循环计数提前通过。
+                snapshot.state == .playing && snapshot.presentedTime.map { time in
+                    time != previous.presentedTime &&
+                        (time > (previous.presentedTime ?? .zero) ||
+                         snapshot.completedIterations > previous.completedIterations)
+                } == true
             }
         }
     }

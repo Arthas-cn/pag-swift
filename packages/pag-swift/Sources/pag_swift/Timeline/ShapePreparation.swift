@@ -278,7 +278,7 @@ private struct CompiledShapeGroup {
 
 /// 准备阶段的有界绘制树，完成后只保留线性指令，不进入逐帧遍历。
 private indirect enum ShapeDrawNode {
-    /// 一个有序绘制子组及其整体 alpha。
+    /// 一个有序绘制子组及其逐draw继承alpha，不代表独立颜色附件。
     case group(opacity: Double, children: [ShapeDrawNode])
     /// 一次填充所引用的完整路径快照。
     case fill(ShapePaint)

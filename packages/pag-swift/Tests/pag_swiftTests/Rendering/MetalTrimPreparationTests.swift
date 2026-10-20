@@ -45,7 +45,7 @@ private actor TrimGPUOwner {
         let c = try MetalFramePreparation.prepare(returned, width: 100, height: 100, resources: resources)
         defer { c.releaseTransients() }
         #expect(a.passes.last?.attachment == nil && b.passes.last?.attachment == nil && c.passes.last?.attachment == nil)
-        #expect(b.passes.count == (group ? 2 : 1))
+        #expect(b.passes.count == 1 && b.loans.isEmpty)
         let old = a.passes.flatMap(\.draws).filter { $0.texture == nil }
         let new = b.passes.flatMap(\.draws).filter { $0.texture == nil }
         let restored = c.passes.flatMap(\.draws).filter { $0.texture == nil }
@@ -60,8 +60,8 @@ private actor TrimGPUOwner {
             #expect(old[index].mesh.triangles === restored[index].mesh.triangles)
         }
         if group {
-            #expect(b.passes[0].rect.width < 100 && b.passes[0].rect.height < 100)
-            #expect(b.passes[1].draws.first?.texture === b.passes[0].attachment?.texture)
+            #expect(new.count == 2)
+            #expect(new.allSatisfy { abs($0.uniforms.color.w - Float(127.0 / 255)) < 1e-6 })
         }
         a.releaseTransients()
         b.releaseTransients()

@@ -1,6 +1,6 @@
 /// 关键帧共有的编码头；数组数量一致，时间数组比插值类型多一项。
 struct KeyframeHeader {
-    /// AttributeHelper::ReadKeyframes 的两位类型：0/1 线性、2 Bezier、3 Hold。
+    /// AttributeHelper::ReadKeyframes的两位原身份：0 None、1 Linear、2 Bezier、3 Hold。
     let kinds: [UInt32]
     /// 连续且不倒序的端点，允许真实文件中的零跨度，差值必须可表示。
     let times: [Int64]

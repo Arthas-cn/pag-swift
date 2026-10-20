@@ -24,7 +24,7 @@ enum MetalFramePreparation {
                 try builder.enter(kind: .composition, clip: group.clip, opacity: group.opacity)
             case .endGroup: try builder.leave(kind: .composition)
             case .beginOpacityGroup(let group):
-                try builder.enter(kind: .opacity, clip: nil, opacity: group.opacity)
+                try builder.enter(kind: .opacity, clip: nil, opacity: group.opacity, application: group.application)
             case .endOpacityGroup: try builder.leave(kind: .opacity)
             case .solid(let solid): if builder.limit != nil { try builder.solid(solid) }
             case .image(let image): if builder.limit != nil { try builder.image(image) }
@@ -71,24 +71,25 @@ private struct MetalFrameBuilder {
     /// 严格配对的组栈，不依赖只检查深度来区分两种end。
     var stack: [MetalGroupScope] = []
 
-    /// 进入整体透明度作用域；半透明组裁剪延迟到合成时，只应用一次。
-    mutating func enter(kind: MetalGroupKind, clip: FrameClip?, opacity: Double) throws {
+    /// 保存透明度作用域；只有composite将裁剪延迟到内容结果，perDraw保留每次实际绘制的裁剪。
+    mutating func enter(kind: MetalGroupKind, clip: FrameClip?, opacity: Double,
+                        application: FrameOpacityApplication = .composite) throws {
         guard opacity.isFinite, (0...1).contains(opacity) else { throw PAGError.renderingFailure("metalGroupOpacity") }
         try budget.reserve(256 + clips.count * 128 + (deferredClips?.count ?? 0) * 128)
         var compositeClips = clips
         if let clip { try compositeClips.append(clip) }
         stack.append(MetalGroupScope(kind: kind, previous: clips, previousDeferred: deferredClips, previousLimit: limit,
-                                     compositeClips: compositeClips, opacity: opacity, start: draws.count))
+                                     compositeClips: compositeClips, opacity: opacity, application: application, start: draws.count))
         if opacity == 0 || compositeClips.isEmpty { limit = nil }
         else if let bounds = compositeClips.bounds { limit = limit?.intersection(bounds) }
         // 将祖先裁剪移到组结果，防止未来抗锯齿覆盖在子内容和组结果各乘一次。
-        if opacity < 1 {
+        if opacity < 1, application == .composite {
             deferredClips = try (deferredClips ?? MetalClipValues()).merging(compositeClips)
         }
-        clips = opacity < 1 ? MetalClipValues() : compositeClips
+        clips = opacity < 1 && application == .composite ? MetalClipValues() : compositeClips
     }
 
-    /// 关闭匹配的组；多个内容的alpha只在组结果上应用，不能分摊到各个子图元。
+    /// 关闭匹配作用域；perDraw继承给当前实际draw，composite保持其独立内容合成边界。
     mutating func leave(kind: MetalGroupKind) throws {
         guard let scope = stack.popLast(), scope.kind == kind else {
             throw PAGError.renderingFailure("metalUnbalancedGroups")
@@ -98,6 +99,15 @@ private struct MetalFrameBuilder {
         deferredClips = scope.previousDeferred
         limit = scope.previousLimit
         guard scope.opacity < 1 else { return }
+        if scope.application == .perDraw {
+            // 内部composite已只留下一个结果draw；原位乘色既不复制数组，也不重复修改其已编码子pass。
+            for index in scope.start..<draws.count {
+                try Task.checkCancellation()
+                try budget.reserve(32)
+                draws[index].color *= Float(scope.opacity)
+            }
+            return
+        }
         let children = Array(draws[scope.start...])
         draws.removeSubrange(scope.start...)
         guard scope.opacity > 0, let groupLimit, let first = children.first else { return }
@@ -276,7 +286,7 @@ private struct MetalFrameBuilder {
 private enum MetalGroupKind {
     /// 附带合成逻辑边界裁剪的预合成/根组。
     case composition
-    /// 只控制整体opacity，没有新裁剪的内容组。
+    /// 没有新裁剪的透明度作用域，按application选择继承或内容组合。
     case opacity
 }
 
@@ -292,8 +302,10 @@ private struct MetalGroupScope {
     let previousLimit: RenderBounds?
     /// 只在组结果应用的祖先与自身裁剪。
     let compositeClips: MetalClipValues
-    /// 经过范围验证的0...1整体alpha。
+    /// 经过范围验证的0...1 alpha，具体消费位置由application决定。
     let opacity: Double
+    /// perDraw在退出时原位乘当前子draw，composite在必要时创建独立结果。
+    let application: FrameOpacityApplication
     /// 子内容在当前绘制数组中的起点。
     let start: Int
 }
@@ -312,8 +324,8 @@ private struct MetalPendingDraw {
     let matrix: SceneAffine
     /// 按实际GPU系数固定的正逆变换；分配范围和最终片元查询共用，不在各pass重复计算。
     let transform: MetalDrawTransform
-    /// 预乘颜色或图片四通道alpha。
-    let color: SIMD4<Float>
+    /// 预乘颜色或图片四通道alpha；组退出时可折入继承alpha，编码后不再修改。
+    var color: SIMD4<Float>
     /// 本图元实际需要执行的真实裁剪。
     let clips: MetalClipValues
     /// 用于局部附件分配的可见保守范围。

@@ -12,8 +12,8 @@ struct MetalStrokePreparationTests {
         try await MetalStrokePreparationOwner(device: #require(MTLCreateSystemDefaultDevice())).verifyCrossing(frame)
     }
 
-    /// 多paint半透明子组保留绘制顺序，整体alpha只在局部结果进入drawable时应用。
-    @Test func subgroupKeepsPaintOrderAndCompositeAlpha() async throws {
+    /// 多paint半透明子组保留绘制顺序，每次paint继承alpha且直接进入drawable。
+    @Test func subgroupKeepsPaintOrderAndInheritedAlpha() async throws {
         let scene = try await MetalStrokeFixtures.scene(MetalStrokeFixtures.mixedGroup())
         let frame = try await ShapePathFixtures.plan(scene, at: 0)
         try await MetalStrokePreparationOwner(device: #require(MTLCreateSystemDefaultDevice())).verifyGroup(frame)
@@ -56,20 +56,17 @@ private actor MetalStrokePreparationOwner {
         #expect(GeometryTestSupport.coverage(draw.mesh.source, at: ScenePoint(x: 25.2, y: 25.3)) == 1)
     }
 
-    /// 绿fill先于红Below和蓝Above，局部附件仅覆盖内容，最终pass直接指向drawable。
+    /// 绿fill先于红Below和蓝Above，每项乘源组alpha，不借用局部颜色附件。
     func verifyGroup(_ frame: PreparedFrame) throws {
         let resources = try MetalResources(device: device)
         let batch = try prepare(frame, resources: resources)
         defer { batch.releaseTransients() }
-        try #require(batch.passes.count == 2 && batch.loans.count == 1)
-        let content = batch.passes[0], root = batch.passes[1]
-        #expect(content.draws.map(\.uniforms.color) == [SIMD4<Float>(0, 1, 0, 1),
-            SIMD4<Float>(1, 0, 0, 1), SIMD4<Float>(0, 0, 1, 1)])
-        #expect(content.rect.width < 100 && content.rect.height < 100)
-        #expect(content.attachment?.texture.storageMode == .private)
-        try #require(root.draws.count == 1)
-        #expect(root.attachment == nil && root.draws[0].texture === content.attachment?.texture)
-        #expect(root.draws[0].uniforms.color == SIMD4<Float>(repeating: 128.0 / 255))
+        try #require(batch.passes.count == 1 && batch.loans.isEmpty)
+        let root = batch.passes[0]
+        let alpha: Float = 128.0 / 255
+        #expect(root.draws.map(\.uniforms.color) == [SIMD4<Float>(0, alpha, 0, alpha),
+            SIMD4<Float>(alpha, 0, 0, alpha), SIMD4<Float>(0, 0, alpha, alpha)])
+        #expect(root.attachment == nil && root.draws.allSatisfy { $0.texture == nil })
         batch.releaseTransients()
         #expect(resources.groups.activeBytes == 0)
     }

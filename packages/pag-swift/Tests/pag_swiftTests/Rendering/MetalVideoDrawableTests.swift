@@ -59,8 +59,8 @@ struct MetalVideoDrawableTests {
                     #expect(!box.mailbox.snapshot.hasLease)
                 }
             }
-            // 0/0文件伸缩范围不改变原始时长播放；完整文件经过公开载入后仍可提交不同时间的帧。
-            for name in ["1", "3", "5", "6", "8", "9", "11", "12", "13", "14", "17", "18", "21"] {
+            // 0/0文件伸缩和TZ2音频元数据都不改变画面时钟；完整文件首中末帧必须实际提交。
+            for name in ["1", "3", "5", "6", "8", "9", "11", "12", "13", "14", "17", "18", "21", "TZ2.pag"] {
                 let file = try await PAGLoader().load(data: PAGFixtures.data(named: name))
                 let source = file.storage.compositions[file.storage.rootIndex]
                 let scene = try await PreparedScene.prepare(file.composition)
@@ -92,7 +92,7 @@ struct MetalVideoDrawableTests {
                     #expect(actual == (try SceneTiming.root(at: time, in: file.storage).representedTime))
                 }
             }
-            // 真实规则块进入共同drawable，但AudioMarker的音频尚未实现，不能把此语义图当整文件支持。
+            // 真实规则块进入共同drawable，但AudioMarker仍有未支持蒙版，不能把语义图当整文件支持。
             for version: UInt16 in [54, 67] {
                 let file = try await ImageTimeFixtures.file(rule: ImageTimeFixtures.realRule(version: version),
                     start: 22, duration: 401, offsets: [0], fileDuration: 500)
@@ -132,7 +132,7 @@ struct MetalVideoDrawableTests {
                 return
             }
             #expect(counts.withLock {
-                $0.count == 84 && $0.allSatisfy { $0 > 0 } &&
+                $0.count == 87 && $0.allSatisfy { $0 > 0 } &&
                     $0.prefix(12).allSatisfy { $0 == 1 } && $0.suffix(3).allSatisfy { $0 == 3 }
             })
             #expect(!box.mailbox.snapshot.hasLease)

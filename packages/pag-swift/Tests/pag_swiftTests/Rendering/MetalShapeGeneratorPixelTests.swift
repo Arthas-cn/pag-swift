@@ -65,7 +65,10 @@ struct MetalShapeGeneratorPixelTests {
                 let alpha: UInt8 = frame == 0 ? 255 : frame == 5 ? 127 : 0
                 let pixels = try await owner.pixels(ShapePathFixtures.plan(opacity, at: frame), target: target,
                                                    at: [SIMD2(30, 50), SIMD2(50, 50), SIMD2(70, 50), SIMD2(5, 5)])
-                expect(pixels, [SIMD4(alpha, 0, 0, alpha), SIMD4(alpha, 0, 0, alpha), SIMD4(0, 0, alpha, alpha), .zero])
+                // 两paint分别淡出，交叉处红覆盖蓝；仅一个复合paint内的轮廓才不重复混合。
+                let remaining = UInt8((Double(alpha) * (1 - Double(alpha) / 255)).rounded())
+                expect(pixels, [SIMD4(alpha, 0, 0, alpha), SIMD4(alpha, 0, remaining, alpha + remaining),
+                    SIMD4(0, 0, alpha, alpha), .zero])
             }
             #expect(target.mailbox.snapshot.hasLease == false)
         } catch {

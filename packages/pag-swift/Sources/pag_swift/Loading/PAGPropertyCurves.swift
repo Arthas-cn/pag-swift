@@ -8,14 +8,16 @@ extension PAGSceneDecoder {
         for kind in header.kinds {
             try Task.checkCancellation()
             switch kind {
+            case 0: result.append(.none)
+            case 1: result.append(.linear)
             case 3: result.append(.hold)
             case 2:
                 let first = try readTimingCurve(width: width, reader: &reader)
                 let second = try dimensions == 2 ? readTimingCurve(width: width, reader: &reader) : nil
                 result.append(.bezier(first: first, second: second))
             default:
-                // 当前标量/Point 配置在 None=0 时也创建普通插值器；与 Linear=1 求值相同。
-                result.append(.linear)
+                // 正式两位字段不会越界，内部头也不能把无定义类型默认为Linear。
+                throw SceneValidator.invalid("invalidKeyframeInterpolation")
             }
         }
         return result

@@ -31,8 +31,9 @@ struct ImageTimeSegment: Sendable {
         guard length > 0 else { throw SceneValidator.invalid("emptyImageTimeInterpolation") }
         let progress = Float(try ImageTimeMath.subtract(frame, start)) / Float(length)
         let eased: Float
+        // None仅静态范围身份不同；源素材帧仍使用普通线性插值，不能走Hold保持起点。
         switch easing {
-        case .linear: eased = progress
+        case .none, .linear: eased = progress
         case .bezier(let curve, _): eased = curve.timing(at: progress)
         case .hold: eased = 0
         }

@@ -134,6 +134,6 @@ struct PAGTrimBoundaryTests {
             #expect(reader.position == 0)
         }
         let snapshot = try await LoadSnapshot.prepare(data: PAGFixtures.data(named: "red.pag"), limits: .standard)
-        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 15)
+        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 17)
     }
 }

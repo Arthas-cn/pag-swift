@@ -14,8 +14,10 @@ struct SourceKeyframe<Value: Sendable>: Sendable {
     let spatialCurve: SampledCurve?
 }
 
-/// 关键帧的时间插值模式，与空间路径几何分别保存。
+/// 关键帧的原始时间插值身份与缓动；None和Linear数值相同但静态范围规则不同。
 enum SourceEasing: Sendable {
+    /// 原始None=0：数值按线性插值，静态范围却在起止点分割，不能折为Linear或Hold。
+    case none
     /// 整个区间保持起点值，在端点由下一段或末值接管。
     case hold
     /// 时间比例直接作为所有分量的插值比例。

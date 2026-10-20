@@ -4,7 +4,8 @@ import Foundation
 extension PAGSceneDecoder {
     /// 读取VideoCompositionTag的ID、字节bool和嵌套标签，不发布PAGFile或假图片层。
     mutating func readVideoComposition(reader: inout PAGByteReader) throws
-        -> (id: UInt32, attributes: CompositionAttributes, video: SourceVideoComposition) {
+        -> (id: UInt32, attributes: CompositionAttributes, video: SourceVideoComposition,
+            audio: SourceAudio?, audioMarkers: [SourceMarker]) {
         try budget.reserve(512)
         let id = try reader.readEncodedUInt32()
         // VideoCompositionTag读取定义ID时允许0；引用的0哨兵由共同图验证器单独处理。
@@ -12,11 +13,15 @@ extension PAGSceneDecoder {
         var attributes: CompositionAttributes?
         var sequences: [SourceVideoSequence] = []
         var headers: [Data?] = []
+        var audio: SourceAudio?
+        var markers: [SourceMarker] = []
         while var block = try nextBlock(from: &reader) {
             switch block.code {
             case 3:
                 guard attributes == nil else { throw SceneValidator.invalid("duplicateCompositionAttributes") }
                 attributes = try readCompositionAttributes(reader: &block.reader)
+            case 53, 55:
+                _ = try readCompositionMetadata(code: block.code, reader: &block.reader, audio: &audio, markers: &markers)
             case 51:
                 sequences.append(try readVideoSequence(reader: &block.reader, hasAlpha: hasAlpha))
                 headers.append(nil)
@@ -33,7 +38,7 @@ extension PAGSceneDecoder {
         }
         guard let attributes else { throw SceneValidator.invalid("missingCompositionAttributes") }
         let video = try SourceVideoComposition(sequences: sequences, mp4Headers: headers, frameRate: attributes.frameRate)
-        return (id, attributes, video)
+        return (id, attributes, video, audio, markers)
     }
 
     /// 按VideoSequence.cpp逐字段读取，SPS交给系统解释；PTS索引与编码顺序保持分离。
