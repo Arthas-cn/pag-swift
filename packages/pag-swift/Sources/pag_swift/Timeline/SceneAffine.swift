@@ -65,6 +65,20 @@ struct SceneAffine: Sendable, Equatable {
         return determinant != 0
     }
 
+    /// 将目标点映回局部坐标；奇异或溢出的矩阵明确失败，不为快照猜测逆映射。
+    func inverted() throws -> SceneAffine {
+        let determinant = a * d - b * c
+        guard determinant.isFinite, determinant != 0 else {
+            throw PAGError.renderingFailure("metalPictureInverseTransform")
+        }
+        let inverse = 1 / determinant
+        // 平移必须同线性部分一起求逆，直接取负会使旋转Vector内容错位。
+        return try SceneAffine(a: d * inverse, b: -b * inverse,
+                               c: -c * inverse, d: a * inverse,
+                               tx: (c * ty - d * tx) * inverse,
+                               ty: (b * tx - a * ty) * inverse)
+    }
+
     /// 创建目标坐标中的平移，拒绝非有限偏移。
     static func translation(x: Double, y: Double) throws -> SceneAffine {
         try SceneAffine(a: 1, b: 0, c: 0, d: 1, tx: x, ty: y)

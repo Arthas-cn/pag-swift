@@ -40,11 +40,11 @@ struct PAGImageScaleTests {
         #expect(replacementCount > 0)
     }
 
-    /// 读懂文件缩放表不能绕过其他未实现语义；15号仍明确拒绝trackMatte。
-    @Test func stillRejectsUnsupportedLayerSemantics() async throws {
-        await #expect(throws: PAGError.unsupportedFeature("trackMatte")) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: "15"))
-        }
+    /// 15号文件的缩放表与轨道遮罩须一起保留，不能因任一字段阻断完整载入。
+    @Test func imageScaleAndTrackMatteCanCoexist() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "15"))
+        #expect(!file.storage.catalog.imageScaleModes.isEmpty)
+        #expect(file.storage.compositions.contains { $0.layers.contains { $0.trackMatte != .none } })
     }
 
     /// 仓库九份真实缩放表完整读到边界，八份含两项，15号样例含十六项LetterBox。

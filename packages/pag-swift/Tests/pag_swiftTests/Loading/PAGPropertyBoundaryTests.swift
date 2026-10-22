@@ -49,17 +49,16 @@ struct PAGPropertyBoundaryTests {
         }
     }
 
-    /// 时间控制点 x 超范围与非有限值都拒绝；y overshoot 仍由正常数值测试覆盖。
-    @Test func invalidValuesAndTimingCoordinatesFail() throws {
+    /// 上游允许负时间控制点x，仍按源折线求值；非有限源属性必须拒绝。
+    @Test func outOfRangeTimingCoordinatesAndNonfiniteValues() throws {
         var invalidCurve = try transformPayload()
         // 原片段偏移 47 是位宽 9 的起点；后续九位 out.x 改为补码 -1，即 -0.005。
         invalidCurve[47] |= 0xe0
         invalidCurve[48] |= 0x3f
         var decoder = decoder()
         var curve = PAGByteReader(data: invalidCurve)
-        #expect(throws: SceneValidator.invalid("invalidTimingControlPoint")) {
-            try decoder.readTransform(reader: &curve)
-        }
+        _ = try decoder.readTransform(reader: &curve)
+        #expect(curve.remainingByteCount == 0)
         var nonfinite = try transformPayload()
         nonfinite.replaceSubrange(23..<27, with: [0, 0, 0xc0, 0x7f])
         var value = PAGByteReader(data: nonfinite)

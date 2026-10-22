@@ -1,5 +1,11 @@
 /// 对不可变轨道做纯数值求值，二分定位关键帧；不维护共享的可变游标。
 enum PropertyEvaluation {
+    /// 离散布尔段内保持起点，最右端交给段终值；不把开关动画当线性数值插值。
+    static func discreteBool(_ property: SourceProperty<Bool>, at frame: Int64) throws -> Bool {
+        try Task.checkCancellation()
+        return try value(property, at: frame) { keyframe, _ in keyframe.startValue }
+    }
+
     /// RGB使用同一时间缓动，逐通道Float插值后钳位并向零截断，与Interpolate<Color/uint8_t>一致。
     static func color(_ property: SourceProperty<SceneColor>, at frame: Int64) throws -> SceneColor {
         try Task.checkCancellation()

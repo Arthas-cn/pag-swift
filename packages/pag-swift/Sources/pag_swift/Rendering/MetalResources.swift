@@ -26,6 +26,8 @@ final class MetalResources {
     private var videoTextureCache: CVMetalTextureCache?
     /// 同owner的局部组附件池，活动纹理仅在GPU结束后归还。
     let groups: MetalGroupPool
+    /// 内容局部Picture独立LRU；只有GPU完成并仍获播放许可才保留。
+    let pictures: MetalPictureStore
     /// 当前留存资源数，仅供内部资源诊断。
     var count: Int { entries.count }
 
@@ -35,6 +37,7 @@ final class MetalResources {
         self.device = device
         self.byteLimit = byteLimit
         groups = try MetalGroupPool(device: device)
+        pictures = try MetalPictureStore(device: device)
         geometryCache = try RenderGeometryCache()
         quad = RenderMesh(origin: .zero, vertices: [ScenePoint(x: 0, y: 0), ScenePoint(x: 1, y: 0),
                                                  ScenePoint(x: 1, y: 1), ScenePoint(x: 0, y: 0),
@@ -184,6 +187,39 @@ final class MetalResources {
         return texture
     }
 
+    /// 把上游256×1颜色表作为小型只读输入上传；同一颜色程序跨帧复用，不缓存最终画面。
+    func gradient(_ colorizer: PreparedGradientColorizer,
+                  budget: inout MetalFrameBudget) throws -> any MTLTexture {
+        guard let stops = colorizer.textureStops else {
+            throw PAGError.unsupportedFeature("gradientTextureColorizer")
+        }
+        let key = MetalResourceKey.gradient(ObjectIdentifier(colorizer))
+        let cost = colorizer.estimatedBytes + 256 * 4 + 512
+        try budget.use(key, bytes: cost)
+        if case .gradient(let retained)? = budget.retained(for: key) { return retained.texture }
+        if case .gradient(let cached)? = value(for: key) {
+            budget.retain(.gradient(cached), for: key)
+            return cached.texture
+        }
+        let pixels = try GradientTexturePixels.make(stops: stops, budget: &budget)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+            width: 256, height: 1, mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw PAGError.renderingFailure("metalGradientTextureAllocation")
+        }
+        texture.label = "pag.input.gradient"
+        pixels.withUnsafeBytes { bytes in
+            texture.replace(region: MTLRegionMake2D(0, 0, 256, 1), mipmapLevel: 0,
+                            withBytes: bytes.baseAddress!, bytesPerRow: 256 * 4)
+        }
+        try Task.checkCancellation()
+        let input = MetalGradientTexture(colorizer: colorizer, texture: texture)
+        budget.retain(.gradient(input), for: key)
+        insert(.gradient(input), for: key, bytes: cost)
+        return texture
+    }
+
     /// 直接导入NV12两平面；同帧/跨帧命中均释放多余交接引用，输入保持只读直到GPU完成。
     func video(_ frame: VideoFrameTransfer, budget: inout MetalFrameBudget) throws -> MetalVideoInput {
         try Task.checkCancellation()
@@ -293,14 +329,32 @@ final class MetalMesh {
     }
 }
 
+/// 输入LUT与其颜色程序共同保活，防止对象身份复用使不同渐变误命中缓存。
+private final class MetalGradientTexture {
+    /// 当前纹理的不可变色标来源。
+    let colorizer: PreparedGradientColorizer
+    /// 上传完成后的256×1 RGBA8输入。
+    let texture: any MTLTexture
+
+    /// 成对保活身份及纹理；Metal资源仍只在RenderOwner域使用。
+    init(colorizer: PreparedGradientColorizer, texture: any MTLTexture) {
+        self.colorizer = colorizer
+        self.texture = texture
+    }
+}
+
 /// GPU输入身份；网格键依赖保活对象，图片键依赖完整编码内容摘要。
 enum MetalResourceKey: Hashable {
     /// 对应MetalMesh.source的对象地址，来源由条目强持有。
     case mesh(ObjectIdentifier)
     /// 同一编码内容和元数据产生相同不可变输入。
     case image(DocumentIdentity)
+    /// 已保活颜色程序的对象身份，动态色标不会与旧帧错误共用纹理。
+    case gradient(ObjectIdentifier)
     /// 完整视频序列与实际PTS，避免复用不同时间或alpha布局的输入。
     case video(VideoFrameID)
+    /// Shape内容快照；同帧多个实例只对同一实际纹理收费一次。
+    case picture(MetalPictureKey)
 }
 
 /// 一帧的去重保活与暂存计费，独立于跨帧LRU留存预算。
@@ -311,6 +365,10 @@ struct MetalFrameBudget {
     private var inputs: [MetalResourceKey: MetalResource] = [:]
     /// 聚合输入资源和绘制暂存的保守成本。
     private var budget: FramePlanBudget
+    /// 当前请求已经保守计费的字节数，只供内部预算验收比较。
+    var usedBytes: Int { budget.used }
+    /// 本次准备仍可为局部效果源点和命令预留的字节数。
+    var remainingBytes: Int { budget.limit - budget.used }
 
     /// 默认64MiB；非法限制明确拒绝。
     init(maximumBytes: Int = 64 * 1024 * 1024) throws {
@@ -346,6 +404,8 @@ private enum MetalResource {
     case mesh(MetalMesh)
     /// 不可变RGBA输入纹理，内容身份不需要保活原像素数组。
     case image(any MTLTexture)
+    /// 持有颜色程序身份与已上传的小输入LUT。
+    case gradient(MetalGradientTexture)
     /// 保活原始系统帧及两个CoreVideo包装，不能只留下MTLTexture。
     case video(MetalVideoInput)
 }

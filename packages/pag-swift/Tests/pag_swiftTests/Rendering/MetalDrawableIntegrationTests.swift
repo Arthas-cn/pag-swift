@@ -87,27 +87,34 @@ struct MetalDrawableIntegrationTests {
                 window.close()
                 return
             }
-            let rejected = makeRequest(scene, epoch: mutation)
+            #expect(await owner.pictureCacheBytes().retained > 0)
+            // 新编辑代数强制重新建Vector纹理，随后撤销要丢弃在途资源而不发布旧画面。
+            let rejected = makeRequest(scene, epoch: mutation, revision: 2)
             revokeAfterEncoding.withLock { $0 = true }
             await #expect(throws: CancellationError.self) { try await owner.submit(rejected) }
             #expect(!box.mailbox.snapshot.hasLease && box.mailbox.snapshot.isBlocked)
+            let revokedBytes = await owner.pictureCacheBytes()
+            #expect(revokedBytes.retained == 0 && revokedBytes.active == 0)
             let resize = box.mailbox.snapshot.epoch
             #expect(await box.mailbox.waitUntilIdle(for: resize))
             geometry = try DisplayGeometry(size: geometry.size, scale: 2)
             #expect(box.resize(to: geometry, mutation: resize))
             #expect(box.mailbox.finishMutation(resize, configuration: DisplayTargetConfiguration(
                 geometry: geometry, isMounted: true, isActive: true)))
-            let current = makeRequest(scene, epoch: resize)
+            let current = makeRequest(scene, epoch: resize, revision: 2)
             guard case .submitted = try await owner.submit(current) else {
                 Issue.record("resize后的新代数未完成GPU提交")
                 await box.shutdown()
                 window.close()
                 return
             }
-            let stale = makeRequest(scene, epoch: mutation)
+            #expect(await owner.pictureCacheBytes().retained > 0)
+            let stale = makeRequest(scene, epoch: mutation, revision: 2)
             await #expect(throws: CancellationError.self) { try await owner.submit(stale) }
             #expect(!box.mailbox.snapshot.hasLease)
-            #expect(counts.withLock { $0.count == 27 && $0.allSatisfy { $0 > 0 } && $0.suffix(3).allSatisfy { $0 == 5 } })
+            // drawCount还包含Vector局部pass；三次新代数均重新建图，撤销不额外编码组结果。
+            #expect(counts.withLock { $0.count == 27 && $0.allSatisfy { $0 > 0 } && Array($0.suffix(3)) == [4, 4, 4] },
+                    "实际编码draw数\(counts.withLock { $0 })")
             let inactive = try #require(box.mailbox.beginMutation())
             #expect(box.mailbox.finishMutation(inactive, configuration: DisplayTargetConfiguration(
                 geometry: geometry, isMounted: true, isActive: false)))
@@ -128,9 +135,10 @@ struct MetalDrawableIntegrationTests {
     }
 
     /// 直接测试owner时显式建立与mailbox一致的token和许可，正常播放器由controller完成此职责。
-    private func makeRequest(_ scene: PreparedScene, epoch: UUID, time: PAGTime = .zero) -> PlaybackFrameRequest {
+    private func makeRequest(_ scene: PreparedScene, epoch: UUID, time: PAGTime = .zero,
+                             revision: UInt64 = 1) -> PlaybackFrameRequest {
         let gate = PlaybackSubmissionGate()
-        let token = PlaybackRequestToken(documentID: scene.composition.storage.identity, compositionRevision: 1,
+        let token = PlaybackRequestToken(documentID: scene.composition.storage.identity, compositionRevision: revision,
                                          playbackEpoch: UUID(), targetEpoch: epoch, requestID: UUID())
         gate.allow(token)
         return PlaybackFrameRequest(scene: scene, time: time, scaleMode: .aspectFit, token: token, gate: gate, endsPlayback: false)

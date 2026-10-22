@@ -6,13 +6,17 @@ enum SceneFixtures {
     /// 无动画的恒等变换，可作为控制层或预合成的有效基础属性。
     static let transform = SourceTransform(anchor: .zero, position: .zero, scale: .one, rotation: 0, opacity: 255)
 
-    /// 创建语义源层，允许测试显式传入无效引用或时长以验证失败路径。
+    /// 创建语义源层，允许测试显式传入无效引用、时长或原始蒙版/轨道遮罩以验证边界。
     static func layer(_ id: UInt32, name: String = "shared", parent: UInt32? = nil,
                       start: Int64 = 0, duration: Int64 = 30,
-                      active: Bool = true, transform: SourceTransformProperties? = nil,
-                      content: SourceLayerContent = .null) -> SourceLayer {
+                      active: Bool = true, trackMatte: SourceTrackMatteType = .none,
+                      transform: SourceTransformProperties? = nil,
+                      content: SourceLayerContent = .null, masks: [SourceMask] = [],
+                      textPath: SourceTextPathOption? = nil) -> SourceLayer {
         SourceLayer(id: id, name: name, parentID: parent, startFrame: start, durationFrames: duration,
-                    isActive: active, transform: transform ?? SourceTransformProperties(constant: Self.transform), content: content)
+                    isActive: active, trackMatte: trackMatte,
+                    transform: transform ?? SourceTransformProperties(constant: Self.transform),
+                    content: content, masks: masks, textPath: textPath)
     }
 
     /// 创建 30 fps 的语义合成，layers 始终表示编码顺序。

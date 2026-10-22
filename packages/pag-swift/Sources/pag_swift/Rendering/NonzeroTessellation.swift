@@ -86,7 +86,7 @@ enum NonzeroTessellation {
     }
 
     /// 有限包围盒左上角作为局部原点，减少巨大平移量在 GPU Float 顶点中的精度损失。
-    private static func origin(of contours: [[ScenePoint]], budget: inout GeometryBudget) throws -> ScenePoint? {
+    static func origin(of contours: [[ScenePoint]], budget: inout GeometryBudget) throws -> ScenePoint? {
         var minimum: ScenePoint?
         for contour in contours {
             for point in contour {
@@ -100,12 +100,12 @@ enum NonzeroTessellation {
     }
 
     /// 消去共同平移；若跨度本身无法表示则失败，不能饱和到任意有限坐标。
-    private static func local(_ point: ScenePoint, origin: ScenePoint) throws -> ScenePoint {
+    static func local(_ point: ScenePoint, origin: ScenePoint) throws -> ScenePoint {
         try GeometryMath.checked(ScenePoint(x: point.x - origin.x, y: point.y - origin.y))
     }
 
     /// 用较长包围轴收窄闭区间候选；原边数组不动，真正交点仍使用原下标顺序计算。
-    private static func addIntersections(_ edges: [ScanBoundary], to levels: inout [Double],
+    static func addIntersections(_ edges: [ScanBoundary], to levels: inout [Double],
                                          budget: inout GeometryBudget) throws {
         let projections = try projections(of: edges, budget: &budget)
         for first in projections.indices {
@@ -184,7 +184,7 @@ enum NonzeroTessellation {
     }
 
     /// 同一填充区间最多两个三角形；反序端点必须通过相邻高度的交点证书。
-    private static func trapezoid(left: ScanBoundary, right: ScanBoundary, lower: Double, upper: Double,
+    static func trapezoid(left: ScanBoundary, right: ScanBoundary, lower: Double, upper: Double,
                                   vertices: inout [ScenePoint], budget: inout GeometryBudget) throws {
         let top = try ScanBoundary.ordered(left, right, at: lower, budget: &budget)
         let bottom = try ScanBoundary.ordered(left, right, at: upper, budget: &budget)
@@ -217,7 +217,7 @@ private struct ScanProjection {
 }
 
 /// 一条活动边在扫描带中点的交点，只保存边下标，不复制轮廓。
-private struct ScanCrossing {
+struct ScanCrossing {
     /// 扫描带下边界的 x；不是源边的较小 x。
     let lowerX: Double
     /// 扫描带上边界的 x，与 lowerX 共同决定是否重合。

@@ -28,7 +28,8 @@ enum SceneValidator {
             }
             try budget.reserve(count: composition.layers.count, stride: 256)
             try validateTime(start: 0, duration: composition.durationFrames, rate: composition.frameRate)
-            try budget.reserve(count: composition.layers.count, stride: 32)
+            // 父链和轨道遮罩都各建一份源下标表；在分配前把新增拓扑空间计入解码预算。
+            try budget.reserve(count: composition.layers.count, stride: 48)
             topologies.append(try validateLayers(in: composition, resources: resources))
             for layer in composition.layers {
                 try Task.checkCancellation()
@@ -58,6 +59,21 @@ enum SceneValidator {
             if layer.imageFillRule != nil, layer.content.kind != .image {
                 throw invalid("imageFillRuleInNonImageLayer")
             }
+            if let option = layer.textPath {
+                guard layer.content.kind == .text else { throw invalid("textPathInNonTextLayer") }
+                // 路径求值目前尚未消费动画器改变后的位移；同时存在时不能丢失任一语义。
+                guard layer.textAnimators.isEmpty else { throw PAGError.unsupportedFeature("textAnimatorPath") }
+                if case .text(let source) = layer.content, source.backgroundAlpha > 0 {
+                    throw PAGError.unsupportedFeature("textBackgroundPath")
+                }
+                // 上游InstallReferences只在当前层的mask列表按ID安装；不能跨层或用相同名称替代。
+                guard option.maskID > 0, layer.masks.contains(where: { $0.id == option.maskID }) else {
+                    throw invalid("missingTextPathMask")
+                }
+            }
+            if !layer.textAnimators.isEmpty, layer.content.kind != .text {
+                throw invalid("textAnimatorInNonTextLayer")
+            }
             if case let .precomposition(_, start) = layer.content {
                 _ = try time(frame: start, rate: composition.frameRate)
             }
@@ -66,10 +82,15 @@ enum SceneValidator {
             }
         }
         var parents = Array<Int?>(repeating: nil, count: composition.layers.count)
+        var trackMatteSources = Array<Int?>(repeating: nil, count: composition.layers.count)
         for (index, layer) in composition.layers.enumerated() {
             if let id = layer.parentID {
                 guard let parent = indices[id] else { throw invalid("missingParentLayer") }
                 parents[index] = parent
+            }
+            // Codec::InstallReferences按同一Vector的编码位置取前一层；首层没有引用，不能按ID或公开逆序树查找。
+            if layer.trackMatte != .none, index > 0 {
+                trackMatteSources[index] = index - 1
             }
         }
         // 父链可能比合成深度长得多；用三色迭代检查，不能递归调用消耗 Swift 栈。
@@ -87,7 +108,7 @@ enum SceneValidator {
             }
             for index in path { states[index] = 2 }
         }
-        return CompositionTopology(parents: parents)
+        return CompositionTopology(parents: parents, trackMatteSources: trackMatteSources)
     }
 
     /// 验证帧与微秒区间均为正且不溢出；文件错误不能泄漏为调用参数错误。

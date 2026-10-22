@@ -12,19 +12,37 @@ extension PAGSceneDecoder {
         guard (1...6).contains(type) else { throw PAGError.unsupportedFeature("layerType:\(type)") }
         let id = try reader.readEncodedUInt32()
         var attributes: LayerAttributes?
+        var attributesExtra: (name: String?, motionBlur: Bool)?
         var transform: SourceTransformProperties?
         var content: SourceLayerContent?
         var shapes: [SourceShape] = []
+        var masks: [SourceMask] = []
         var markers: [SourceMarker] = []
         var imageFillRule: SourceImageFillRule?
+        var textPath: SourceTextPathOption?
+        var textAnimators: [SourceTextAnimator] = []
+        var dropShadows: [SourceDropShadow] = []
+        var motionTile: SourceMotionTile?
+        var bulge: SourceBulge?
+        var cornerPin: SourceCornerPin?
+        var levelsGreenOnly = false
+        var imageEffectOrder: [UInt16] = []
+        var precompositionEffectOrder: [UInt16] = []
         while var block = try nextBlock(from: &reader) {
             switch block.code {
             case 6, 52, 62:
                 guard attributes == nil else { throw PAGError.invalidFile(reason: "duplicateLayerAttributes", offset: nil) }
                 attributes = try readLayerAttributes(code: block.code, reader: &block.reader)
+            case 63:
+                guard attributesExtra == nil else { throw PAGError.invalidFile(reason: "duplicateLayerAttributesExtra", offset: nil) }
+                attributesExtra = try readLayerAttributesExtra(reader: &block.reader)
             case 13:
                 guard transform == nil else { throw PAGError.invalidFile(reason: "duplicateTransform", offset: nil) }
                 transform = try readTransform(reader: &block.reader)
+            case 14, 84:
+                // LayerTag按编码顺序追加，不按ID去重；未知模式和未完成属性由读取/求值门禁负责。
+                try budget.reserve(32)
+                masks.append(try readMask(code: block.code, reader: &block.reader))
             case 7 where type == 2:
                 guard content == nil else { throw PAGError.invalidFile(reason: "duplicateLayerContent", offset: nil) }
                 content = try readSolid(reader: &block.reader)
@@ -39,7 +57,7 @@ extension PAGSceneDecoder {
                 guard content == nil else { throw PAGError.invalidFile(reason: "duplicateLayerContent", offset: nil) }
                 content = .precomposition(id: try block.reader.readEncodedUInt32(),
                                          startFrame: try StaticAttributes.frame(from: &block.reader))
-            case 15...23, 25:
+            case 15...26:
                 // LayerTag.cpp与ShapeGroup共用ReadShape；已实现内容可直接位于层内，不能只允许在组内出现。
                 guard type == 4 else { throw PAGError.invalidFile(reason: "shapeInNonShapeLayer", offset: nil) }
                 shapes.append(try readShape(code: block.code, reader: &block.reader, depth: 1))
@@ -49,6 +67,40 @@ extension PAGSceneDecoder {
                 guard type == 5 else { throw SceneValidator.invalid("imageFillRuleInNonImageLayer") }
                 guard imageFillRule == nil else { throw SceneValidator.invalid("duplicateImageFillRule") }
                 imageFillRule = try readImageFillRule(code: block.code, reader: &block.reader)
+            case 69:
+                guard type == 3 else { throw SceneValidator.invalid("textPathInNonTextLayer") }
+                guard textPath == nil else { throw SceneValidator.invalid("duplicateTextPath") }
+                textPath = try readTextPathOption(reader: &block.reader)
+            case 70:
+                guard type == 3 else { throw SceneValidator.invalid("textAnimatorInNonTextLayer") }
+                try budget.reserve(64)
+                textAnimators.append(try readTextAnimator(reader: &block.reader))
+            case 29, 65:
+                // 同一图层可以有多条样式，原编码顺序决定投影彼此的覆盖顺序。
+                dropShadows.append(try readDropShadow(code: block.code, reader: &block.reader))
+            case 56:
+                guard type == 5 || type == 6 else { throw PAGError.unsupportedFeature("motionTileNonImage") }
+                guard motionTile == nil else { throw PAGError.unsupportedFeature("multipleMotionTile") }
+                motionTile = try readMotionTile(reader: &block.reader)
+                imageEffectOrder.append(56)
+                if type == 6 { precompositionEffectOrder.append(56) }
+            case 57:
+                guard type == 6, !levelsGreenOnly else {
+                    throw PAGError.unsupportedFeature("levelsIndividualLayer")
+                }
+                try readGreenOnlyLevels(reader: &block.reader)
+                levelsGreenOnly = true
+                precompositionEffectOrder.append(57)
+            case 58:
+                guard type == 5 else { throw PAGError.unsupportedFeature("cornerPinNonImage") }
+                guard cornerPin == nil else { throw PAGError.unsupportedFeature("multipleCornerPin") }
+                cornerPin = try readCornerPin(reader: &block.reader)
+                imageEffectOrder.append(58)
+            case 59:
+                guard type == 3 || type == 5 else { throw PAGError.unsupportedFeature("bulgeNonImageOrText") }
+                guard bulge == nil else { throw PAGError.unsupportedFeature("multipleBulge") }
+                bulge = try readBulge(reader: &block.reader)
+                imageEffectOrder.append(59)
             default:
                 throw PAGError.unsupportedFeature("layerTag:\(block.code)")
             }
@@ -57,13 +109,77 @@ extension PAGSceneDecoder {
         guard let attributes, let transform else {
             throw PAGError.invalidFile(reason: "missingLayerAttributesOrTransform", offset: nil)
         }
+        if attributesExtra?.motionBlur == true {
+            // 上游只比较本层及父层的相邻帧矩阵；仅严格静态且无父层时可证明滤镜每帧跳过。
+            let staticSkip = canSkipMotionBlur(transform: transform, parentID: attributes.parentID)
+            // 先开放真实Screen/Levels/静态MotionTile预合成，其他动态组合仍须有独立输入域与材质验证。
+            let supportedDynamic = type == 6 && attributes.blendMode == .screen &&
+                levelsGreenOnly && motionTile != nil && attributes.parentID == nil
+            guard staticSkip || supportedDynamic else {
+                throw PAGError.unsupportedFeature("motionBlur")
+            }
+        }
+        // 上游仅定义0...1的扩散份额；中间值由扩散后Gaussian的局部批次处理。
+        guard dropShadows.allSatisfy({ $0.spread.isFinite && (0...1).contains($0.spread) }) else {
+            throw PAGError.unsupportedFeature("dropShadowSpread")
+        }
+        guard dropShadows.allSatisfy({ $0.size.isFinite && $0.size >= 0 }) else {
+            throw PAGError.unsupportedFeature("dropShadowNegativeSize")
+        }
+        if motionTile != nil {
+            // 源图层mask必须先作用于输入再重复像素；单图像直采路径暂不偷换为输出裁剪。
+            guard masks.isEmpty else { throw PAGError.unsupportedFeature("motionTileLayerMasks") }
+            guard dropShadows.isEmpty else { throw PAGError.unsupportedFeature("motionTileLayerStyle") }
+        }
+        if type == 6, let tile = motionTile {
+            // 预合成只开放真实[57,56]静态组合，动态平铺或其它颜色链不能误进窄范围片元。
+            guard levelsGreenOnly, attributes.blendMode == .screen,
+                  tile.center.isAnimated == false, tile.tileWidth.isAnimated == false,
+                  tile.tileHeight.isAnimated == false, tile.outputWidth.isAnimated == false,
+                  tile.outputHeight.isAnimated == false, tile.mirrorEdges.isAnimated == false,
+                  tile.phase.isAnimated == false, tile.horizontalPhaseShift.isAnimated == false,
+                  tile.tileWidth.initialValue == 100, tile.tileHeight.initialValue == 100,
+                  tile.outputWidth.initialValue == 300, tile.outputHeight.initialValue == 300,
+                  tile.mirrorEdges.initialValue, tile.phase.initialValue == 0,
+                  !tile.horizontalPhaseShift.initialValue,
+                  precompositionEffectOrder == [57, 56] else {
+                throw PAGError.unsupportedFeature("motionTilePrecomposition")
+            }
+        }
+        if bulge != nil {
+            // Image直采与Text先合成再取样均不允许图层mask；Text投影在Bulge后由已有外层处理。
+            guard motionTile == nil else { throw PAGError.unsupportedFeature("bulgeMultipleEffects") }
+            guard masks.isEmpty else { throw PAGError.unsupportedFeature("bulgeLayerMasks") }
+            guard type == 3 || dropShadows.isEmpty else { throw PAGError.unsupportedFeature("bulgeLayerStyle") }
+        }
+        if cornerPin != nil {
+            // 上游逐项按编码顺序作用；目前只有两份真实双效果顺序有可直采等价式。
+            guard imageEffectOrder == [58] || imageEffectOrder == [56, 58] ||
+                  imageEffectOrder == [58, 59] else {
+                throw PAGError.unsupportedFeature("cornerPinEffectOrder")
+            }
+            guard masks.isEmpty else { throw PAGError.unsupportedFeature("cornerPinLayerMasks") }
+            guard dropShadows.isEmpty else { throw PAGError.unsupportedFeature("cornerPinLayerStyle") }
+        }
         if type == 1 { content = .null }
         if type == 4 { content = .shape(shapes) }
         guard let content else { throw PAGError.invalidFile(reason: "missingLayerContent", offset: nil) }
-        return SourceLayer(id: id, name: attributes.name, parentID: attributes.parentID,
+        guard attributes.blendMode == .normal || type == 6 else {
+            throw PAGError.unsupportedFeature("layerBlendMode")
+        }
+        guard !levelsGreenOnly || attributes.blendMode == .screen else {
+            throw PAGError.unsupportedFeature("levelsIndividualBlend")
+        }
+        return SourceLayer(id: id, name: attributesExtra?.name ?? attributes.name, parentID: attributes.parentID,
                            startFrame: attributes.start, durationFrames: attributes.duration,
-                           isActive: attributes.isActive, transform: transform, content: content,
-                           markers: markers, timing: attributes.timing, imageFillRule: imageFillRule)
+                           isActive: attributes.isActive, trackMatte: attributes.trackMatte,
+                           blendMode: attributes.blendMode, levelsGreenOnly: levelsGreenOnly,
+                           motionBlur: attributesExtra?.motionBlur == true,
+                           transform: transform, content: content,
+                           masks: masks, textPath: textPath, textAnimators: textAnimators,
+                           dropShadows: dropShadows, motionTile: motionTile, bulge: bulge,
+                           cornerPin: cornerPin, markers: markers,
+                           timing: attributes.timing, imageFillRule: imageFillRule)
     }
 
     /// 读取LayerAttributes三个版本，保留完整层时间元数据；尚未支持的画面语义仍拒绝。
@@ -84,8 +200,15 @@ extension PAGSceneDecoder {
             throw SceneValidator.invalid("zeroLayerStretchDenominator")
         }
         let start = try f[p + 2].exists ? StaticAttributes.frame(from: &reader) : 0
-        try StaticAttributes.requireDefault(f[p + 3].exists, name: "layerBlendMode", from: &reader)
-        try StaticAttributes.requireDefault(f[p + 4].exists, name: "trackMatte", from: &reader)
+        let rawBlendMode = try f[p + 3].exists ? reader.readUInt8() : 0
+        guard let blendMode = SourceLayerBlendMode(rawValue: rawBlendMode) else {
+            throw PAGError.unsupportedFeature("layerBlendMode")
+        }
+        let rawTrackMatte = try f[p + 4].exists ? reader.readUInt8() : 0
+        // 上游枚举仅有0...4；未知字节不是一个可按Alpha或None降级的合法模式。
+        guard let trackMatte = SourceTrackMatteType(rawValue: rawTrackMatte) else {
+            throw PAGError.invalidFile(reason: "unknownTrackMatteType", offset: reader.position - 1)
+        }
         // Layer::excludeVaryingRanges只用此轨道阻止静态复用；不能拿它代替预合成或图片素材的时钟。
         let timeRemap = try readScalarProperty(f[p + 5], defaultValue: 0, reader: &reader)
         let duration = try StaticAttributes.frame(from: &reader)
@@ -93,7 +216,25 @@ extension PAGSceneDecoder {
         guard duration > 0 else { throw PAGError.invalidFile(reason: "nonpositiveLayerDuration", offset: nil) }
         return LayerAttributes(isActive: f[0].exists, parentID: parent == 0 ? nil : parent,
             start: start, duration: duration, name: name,
-            timing: SourceLayerTiming(stretchNumerator: numerator, stretchDenominator: denominator, timeRemap: timeRemap))
+            timing: SourceLayerTiming(stretchNumerator: numerator, stretchDenominator: denominator, timeRemap: timeRemap),
+            trackMatte: trackMatte, blendMode: blendMode)
+    }
+
+    /// 读取tag63的可选名称与运动模糊标记；是否可播放由完整图层变换决定。
+    private func readLayerAttributesExtra(reader: inout PAGByteReader) throws -> (name: String?, motionBlur: Bool) {
+        let flags = try PropertyFlags.read([.flag, .flag], from: &reader)
+        let name = try flags[0].exists ? reader.readUTF8String() : nil
+        return (name, flags[1].exists)
+    }
+
+    /// 仅在上游相邻帧矩阵必然相等时接受已编码但无实际效果的运动模糊。
+    private func canSkipMotionBlur(transform: SourceTransformProperties, parentID: UInt32?) -> Bool {
+        guard parentID == nil, !transform.anchor.isAnimated, !transform.scale.isAnimated,
+              !transform.rotation.isAnimated else { return false }
+        switch transform.position {
+        case .combined(let value): return !value.isAnimated
+        case .separated(let x, let y): return !x.isAnimated && !y.isAnimated
+        }
     }
 
     /// SolidColor.cpp 先读 RGB，再读编码 Int32 尺寸；单色层必须具有正尺寸。
@@ -120,4 +261,8 @@ struct LayerAttributes {
     let name: String
     /// 已完整读取的层时间元数据；完整层失败时随暂存值丢弃。
     let timing: SourceLayerTiming
+    /// 已校验的轨道遮罩文件值；非None尚不能作为可播放图层发布。
+    let trackMatte: SourceTrackMatteType
+    /// 经原始单字节值验证的整层混合模式。
+    let blendMode: SourceLayerBlendMode
 }

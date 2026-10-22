@@ -84,19 +84,28 @@ struct PAGMaskBoundaryTests {
         await task.value
     }
 
-    /// 内部读取不能自动接通图层14/84；最小Layer字段仍失败，版本17仅补None插值身份。
-    @Test func formalLayerGatesRemainClosed() async throws {
+    /// 正式层已按顺序读取14/84；缺少必需属性的短层仍失败，完整真实文件才算载入成功。
+    @Test func formalLayerDispatchRequiresCompleteLayer() async throws {
         for code: UInt16 in [14, 84] {
             let header = code << 6 | 2
-            // LayerTag先读类型和ID；仅给蒙版字段用于验证首个分发门禁，不是完整合法Layer或PAG。
-            var reader = PAGByteReader(data: Data([1, 1, UInt8(truncatingIfNeeded: header), UInt8(header >> 8), 0, 0]))
+            // LayerTag先读类型和ID；只有蒙版字段的层仍没有Attributes/Transform。
+            var reader = PAGByteReader(data: Data([1, 1, UInt8(truncatingIfNeeded: header), UInt8(header >> 8), 0, 0, 0, 0]))
             var decoder = TrimFixtures.decoder()
-            #expect(throws: PAGError.unsupportedFeature("layerTag:\(code)")) { try decoder.readLayer(reader: &reader) }
+            #expect(throws: PAGError.invalidFile(reason: "missingLayerAttributesOrTransform", offset: nil)) {
+                try decoder.readLayer(reader: &reader)
+            }
         }
-        await #expect(throws: PAGError.unsupportedFeature("layerTag:14")) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: "AudioMarker.pag"))
-        }
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "AudioMarker.pag"))
+        let masks = file.storage.compositions.flatMap(\.layers).flatMap(\.masks)
+        #expect(masks.count == 1 && masks[0].id == 2 && masks[0].mode == .add)
         let snapshot = try await LoadSnapshot.prepare(data: PAGFixtures.data(named: "red.pag"), limits: .standard)
-        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 17)
+        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 30)
+    }
+
+    /// tag14开放后，三份此前被蒙版标签挡住的完整文件须保留源蒙版并成功载入。
+    @Test(arguments: ["list/2.pag", "list/6.pag", "list/10.pag"])
+    func newlyUnblockedFilesRetainMasks(_ name: String) async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: name))
+        #expect(!file.storage.compositions.flatMap(\.layers).flatMap(\.masks).isEmpty)
     }
 }

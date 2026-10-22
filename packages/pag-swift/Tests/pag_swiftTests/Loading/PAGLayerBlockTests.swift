@@ -61,7 +61,7 @@ struct PAGLayerBlockTests {
         }
     }
 
-    /// Trim可直接位于ShapeLayer，其他类型必须拒绝；相邻未支持标签仍不能作为层内容读取。
+    /// Trim/Repeater可直接位于ShapeLayer，其他类型必须拒绝；RoundCorners仍保持层门禁。
     @Test func trimRequiresShapeLayerAndDoesNotOpenAdjacentTags() throws {
         let layer = try decodeLayer(type: 4, content: tag(25, payload: [0]))
         guard case .shape(let elements) = layer.content, case .trimPaths(let trim) = elements.first else {
@@ -72,7 +72,14 @@ struct PAGLayerBlockTests {
         #expect(throws: SceneValidator.invalid("shapeInNonShapeLayer")) {
             try decodeLayer(type: 1, content: tag(25, payload: [0]))
         }
-        for code: UInt16 in [24, 26, 27] {
+        let repeated = try decodeLayer(type: 4, content: tag(26, payload: [0, 0]))
+        guard case .shape(let repeatedElements) = repeated.content,
+              case .repeater(let value) = repeatedElements.first else {
+            Issue.record("根层Repeater必须保留源节点")
+            return
+        }
+        #expect(value.copies.initialValue == 3 && value.order == .below)
+        for code: UInt16 in [27] {
             #expect(throws: PAGError.unsupportedFeature("layerTag:\(code)")) {
                 try decodeLayer(type: 4, content: tag(code, payload: [0]))
             }

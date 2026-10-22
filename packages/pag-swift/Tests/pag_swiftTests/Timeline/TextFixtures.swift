@@ -16,6 +16,7 @@ enum TextFixtures {
     /// 在明确的非主 actor 调用中执行同步准备，只返回 Sendable 值和不可变路径。
     @concurrent static func prepare(_ source: SourceText, maximumBytes: Int = 64 * 1024 * 1024) async throws -> PreparedTextLayer {
         var budget = FramePlanBudget(limit: maximumBytes, resourceName: "maximumPreparedSceneBytes")
-        return try TextPreparation.prepare(source, style: source.style, budget: &budget)
+        return try TextPreparation.prepare(source, reference: SourceLayerReference(composition: 0, layer: 0),
+                                           style: source.style, budget: &budget)
     }
 }

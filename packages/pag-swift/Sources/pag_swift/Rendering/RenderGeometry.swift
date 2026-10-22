@@ -58,6 +58,8 @@ struct GeometryBudget {
     let maximumDepth: Int
     /// 已执行或即将执行的逻辑工作量，不会超过 maximumWork。
     private(set) var work = 0
+    /// 已预付的逻辑内存成本，供精确上限回归验证，不代表实际allocator峰值。
+    var usedBytes: Int { bytes.used }
 
     /// 使用有界默认策略；非法策略抛 invalidArgument，取消立即传播。
     init(maximumBytes: Int = 64 * 1024 * 1024, maximumWork: Int = 16_777_216,

@@ -6,13 +6,19 @@ enum RenderGeometrySource: Sendable {
     case glyph(GlyphOutline)
     /// 普通蒙版的有限nonzero路径；反向标记由显示作用域持有，不进入几何缓存键。
     case mask(SourcePath)
+    /// 非零扩张或多条普通路径的有序Boolean；每项扩张值也进入缓存键。
+    case maskExpression(SampledMaskExpression)
 
     /// 仅当来源对象仍被保活时有效的身份，不使用内容摘要重新遍历整条路径。
-    var identity: ObjectIdentifier {
+    var identity: GeometrySourceIdentity {
         switch self {
-        case let .shape(value): ObjectIdentifier(value)
-        case let .glyph(value): ObjectIdentifier(value)
-        case let .mask(value): ObjectIdentifier(value)
+        case let .shape(value): .object(ObjectIdentifier(value))
+        case let .glyph(value): .object(ObjectIdentifier(value))
+        case let .mask(value): .object(ObjectIdentifier(value))
+        case let .maskExpression(value): .mask(value.terms.map {
+            MaskTermIdentity(path: ObjectIdentifier($0.path), mode: $0.mode.rawValue,
+                             inverted: $0.isInverted, expansionBits: $0.expansion.bitPattern)
+        })
         }
     }
 
@@ -23,6 +29,7 @@ enum RenderGeometrySource: Sendable {
         switch self {
         case let .shape(value): return value.estimatedBytes
         case let .mask(value): return value.estimatedBytes
+        case let .maskExpression(value): return value.estimatedBytes
         case let .glyph(value): count = value.elements.count; stride = 128
         }
         let array = count.multipliedReportingOverflow(by: stride)
@@ -37,10 +44,57 @@ enum RenderGeometrySource: Sendable {
         case let .shape(value): contours = try PathFlattening.shape(value, tolerance: precision.tolerance, budget: &budget)
         case let .glyph(value): contours = try PathFlattening.glyph(value, tolerance: precision.tolerance, budget: &budget)
         case let .mask(value): contours = try PathFlattening.sourcePath(value, tolerance: precision.tolerance, budget: &budget)
+        case let .maskExpression(value):
+            try budget.reserve(value.terms.count, stride: 64)
+            // 与普通来源一样先支付最终RenderMesh外壳；不能因本分支提前返回漏收。
+            try budget.reserve(stride: 128)
+            var operands: [MaskBooleanOperand] = []
+            operands.reserveCapacity(value.terms.count)
+            for term in value.terms {
+                try budget.consume()
+                let contours = try PathFlattening.sourcePath(term.path, tolerance: precision.tolerance,
+                                                              budget: &budget)
+                let stroke = try MaskExpansionGeometry.strokeContours(
+                    for: term.path, expansion: term.expansion, original: contours,
+                    tolerance: precision.tolerance, budget: &budget)
+                operands.append(MaskBooleanOperand(contours: contours, strokeContours: stroke,
+                                                   expansion: term.expansion, mode: term.mode,
+                                                   isInverted: term.isInverted))
+            }
+            let result = try MaskBooleanTessellation.prepare(operands, budget: &budget)
+            guard result.isInverted == value.isInverted else {
+                throw PAGError.renderingFailure("maskBooleanOutside")
+            }
+            // PathKit对零verb撤销clip：远场false的空网格可能隐藏或不裁剪，必须拒绝；
+            // 远场true的空网格两种路径都让全部内容可见，可安全保留补集标记。
+            guard result.isInverted || !result.mesh.vertices.isEmpty else {
+                throw PAGError.unsupportedFeature("maskBooleanEmptyResult")
+            }
+            return result.mesh
         }
         try budget.reserve(stride: 128)
         return try NonzeroTessellation.prepare(contours, budget: &budget)
     }
+}
+
+/// 网格来源的语义身份；多路径键保留完整有序列表，不借表达式临时对象地址命中。
+enum GeometrySourceIdentity: Hashable {
+    /// 单个既有不可变来源的对象身份。
+    case object(ObjectIdentifier)
+    /// 全部普通蒙版路径及其操作的有序身份。
+    case mask([MaskTermIdentity])
+}
+
+/// 一条普通蒙版源项的缓存键片段；顺序由外层数组固定。
+struct MaskTermIdentity: Hashable {
+    /// 被缓存条目强保活的源路径对象身份。
+    let path: ObjectIdentifier
+    /// 原始mode数值，不将首项不同模式提前合并成同一个键。
+    let mode: UInt8
+    /// 本项反向位，可改变布尔结果与远场。
+    let inverted: Bool
+    /// 当前帧Float扩张位型；同一路径不同扩张不能共享网格。
+    let expansionBits: UInt32
 }
 
 /// 后台渲染 owner 独占的有界 O(1) LRU；这里只缓存网格，不缓存最终画面或逐帧副本。
@@ -68,8 +122,14 @@ struct RenderGeometryCache {
     mutating func mesh(for source: RenderGeometrySource, transform: SceneAffine,
                        budget: inout GeometryBudget) throws -> RenderMesh {
         try budget.consume()
+        if case .maskExpression(let expression) = source {
+            // 复合键会分配路径身份数组；命中也须为构键工作和临时空间付费。
+            try budget.consume(expression.terms.count)
+            try budget.reserve(expression.terms.count, stride: 32)
+        }
         let precision = try GeometryPrecision(transform: transform)
         let key = GeometryCacheKey(identity: source.identity, precision: precision)
+        try Task.checkCancellation()
         if let entry = entries[key] {
             // 已缓存不代表新的请求可以绕开更低资源上限；来源数据本身不重复复制。
             try budget.reserve(stride: entry.mesh.estimatedBytes)
@@ -131,7 +191,7 @@ struct RenderGeometryCache {
 /// 仅由不可变来源身份和几何精度组成；颜色、透明度与平移均在编码时应用。
 private struct GeometryCacheKey: Hashable {
     /// 由条目 source 保活的对象身份。
-    let identity: ObjectIdentifier
+    let identity: GeometrySourceIdentity
     /// 由线性变换决定的细分档位。
     let precision: GeometryPrecision
 }

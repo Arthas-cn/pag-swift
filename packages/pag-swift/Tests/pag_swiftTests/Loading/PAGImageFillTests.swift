@@ -69,7 +69,7 @@ struct PAGImageFillTests {
         for count in 7..<bytes.count { #expect(throws: PAGError.self) { try decode(Array(bytes.prefix(count))) } }
     }
 
-    /// 损坏、超预算和取消都不返回规则；完整文件越过音频后仍拒绝尚未支持的蒙版。
+    /// 损坏、超预算和取消都不返回规则；完整文件越过音频与蒙版后可正式载入。
     @Test func damageBudgetCancellationAndFullFileGate() async throws {
         let data = try PAGFixtures.data(named: "AudioMarker.pag")
         let bytes = Array(data[1_971_301..<1_971_319])
@@ -82,7 +82,8 @@ struct PAGImageFillTests {
             #expect(throws: CancellationError.self) { try decode(bytes) }
         }
         await task.value
-        await #expect(throws: PAGError.unsupportedFeature("layerTag:14")) { try await PAGLoader().load(data: data) }
+        let file = try await PAGLoader().load(data: data)
+        #expect(file.storage.compositions.flatMap(\.layers).flatMap(\.masks).count == 1)
     }
 
     /// 只把独立字段交给真实读取入口，预算与错误保持生产语义。

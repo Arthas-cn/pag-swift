@@ -16,6 +16,8 @@ actor RenderOwner: PlaybackSubmitting {
     private var target: DisplayTargetBox?
     /// 首次实际帧准备时创建的有界输入缓存和管线，裸资源只属于本actor。
     private var resources: MetalResources?
+    /// Picture内容所属的编辑/显示代数；变化时先清旧LRU再准备新帧。
+    private var pictureConfiguration: RenderPictureConfiguration?
     /// 等待后台求值或GPU完成时仍保持占用，防止actor可重入导致第二份帧绕过单活动工作上限。
     private var isSubmitting = false
     /// 绑定交接等待活动提交真正退出的屏障；显示租约归还不等于actor恢复已结束。
@@ -82,14 +84,28 @@ actor RenderOwner: PlaybackSubmitting {
                 resources = try MetalResources(device: device)
                 self.resources = resources
             }
+            let pictureConfiguration = RenderPictureConfiguration(document: scene.composition.storage.identity,
+                                                                  revision: request.token.compositionRevision,
+                                                                  epoch: request.token.targetEpoch,
+                                                                  width: geometry.pixelWidth,
+                                                                  height: geometry.pixelHeight)
+            if self.pictureConfiguration != pictureConfiguration {
+                resources.pictures.clear()
+                self.pictureConfiguration = pictureConfiguration
+            }
             batch = try MetalFramePreparation.prepare(frame, width: geometry.pixelWidth, height: geometry.pixelHeight,
-                                                       resources: resources)
+                                                       resources: resources,
+                                                       revision: request.token.compositionRevision,
+                                                       pictures: resources.pictures)
             representedTime = frame.plan.time.representedTime
         } else {
             // 清屏不借用假场景，也不为零绘制编译管线或分配输入buffer。
             guard request.token.documentID == nil, request.time == .zero, !request.endsPlayback else {
                 throw PAGError.renderingFailure("metalClearRequest")
             }
+            // 合成卸载后不再保留旧内容纹理；在途批次仍独立保活直到GPU回调结束。
+            resources?.pictures.clear()
+            pictureConfiguration = nil
             batch = nil
             representedTime = nil
         }
@@ -113,6 +129,7 @@ actor RenderOwner: PlaybackSubmitting {
                     buffer.label = "pag.frame"
                     if let batch { try batch.encode(to: drawable, commandBuffer: buffer, geometry: geometry) }
                     else { try MetalFrameBatch.clear(to: drawable, commandBuffer: buffer, geometry: geometry) }
+                    for reason in batch?.pictureMisses ?? [] { observe?(.pictureMiss(request.token.requestID, reason: reason)) }
                     observe?(.encoded(request.token.requestID, drawCount: batch?.drawCount ?? 0))
                     let mailbox = target.mailbox
                     let observe = self.observe
@@ -153,6 +170,18 @@ actor RenderOwner: PlaybackSubmitting {
         }
         try validate(request, target: target)
         guard try result.get() else { return .targetUnavailable }
+        if let batch, !batch.pictureWorks.isEmpty {
+            observe?(.pictureReadyToPublish(request.token.requestID))
+            // 锁序与commit一致：播放gate→显示信箱。撤销若在线性化点之前发生，旧纹理只释放不发布。
+            let published = request.gate.withCompletionPermission(for: request.token) {
+                target.mailbox.withCompletedEpochPermission(for: request.token.targetEpoch) {
+                    batch.publishPictures()
+                    return true
+                } == true
+            } == true
+            // 任一代数已过期时，GPU完成也不能让播放器接收这次旧画面。
+            guard published else { throw CancellationError() }
+        }
         return representedTime.map(PlaybackSubmission.submitted) ?? .cleared
     }
 
@@ -165,6 +194,11 @@ actor RenderOwner: PlaybackSubmitting {
         }
     }
 
+    /// 内部验收读取Picture缓存占用；只返回整数，不把纹理交给测试或UI域。
+    func pictureCacheBytes() -> (retained: Int, active: Int) {
+        (resources?.pictures.retainedBytes ?? 0, resources?.pictures.activeBytes ?? 0)
+    }
+
     /// 每个暂停点或长系统调用后校验取消、播放许可和实际显示代数；过期成功不得传播给控制器。
     private func validate(_ request: PlaybackFrameRequest, target: DisplayTargetBox) throws {
         try Task.checkCancellation()
@@ -175,6 +209,20 @@ actor RenderOwner: PlaybackSubmitting {
     }
 }
 
+/// 内容快照的显示与编辑有效期；尺寸变化后即使源Shape相同也先清理旧缓存。
+private struct RenderPictureConfiguration: Equatable {
+    /// 同播放器可能装载另一份文件，不能沿用旧源下标。
+    let document: DocumentIdentity
+    /// 内容编辑或撤销均经过新的播放代数。
+    let revision: UInt64
+    /// mount、resize及目标租约变更代数。
+    let epoch: UUID
+    /// 当前drawable的像素宽度。
+    let width: Int
+    /// 当前drawable的像素高度。
+    let height: Int
+}
+
 /// 渲染owner内部小值诊断；编码完成不代表GPU已经执行或显示。
 enum RenderEvent: Sendable {
     /// 已注册活动提交退出屏障；用于确定性验证两个绑定交接，不暴露continuation。
@@ -183,6 +231,10 @@ enum RenderEvent: Sendable {
     case encoded(UUID, drawCount: Int)
     /// 系统报告已完成的GPU区间秒数；不含CPU准备/显示等待，也不代表该请求仍是当前代数。
     case gpuCompleted(UUID, seconds: Double)
+    /// 某个可选Shape快照未建立，随后按原命令逐draw；原因仅供内部诊断。
+    case pictureMiss(UUID, reason: String)
+    /// GPU完成并复核请求后、取得发布双锁之前的确定性竞争注入点。
+    case pictureReadyToPublish(UUID)
 }
 
 /// GPU 配置完成后的内部纯值诊断，不暴露任何 Metal 对象。

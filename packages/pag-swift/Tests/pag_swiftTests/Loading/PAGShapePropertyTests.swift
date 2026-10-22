@@ -171,13 +171,11 @@ struct PAGShapePropertyTests {
         #expect(scene.dynamicShapes != nil)
     }
 
-    /// 其余三份文件仍有未支持语义，必须拒绝完整文件，不能因属性能读就跳过内容；渐变文件另组回归。
-    @Test(arguments: [("alpha2.pag", "trackMatte"), ("list/2.pag", "layerTag:14"),
-                      ("list/8.pag", "shapeTag:24")])
-    func remainingContentStillFailsExplicitly(_ name: String, _ reason: String) async throws {
-        await #expect(throws: PAGError.unsupportedFeature(reason)) {
-            try await PAGSceneDecoder.decode(PAGFixtures.data(named: name))
-        }
+    /// 真实alpha2的形状与邻层遮罩应同时留在完整源图中供后续帧计划消费。
+    @Test func alpha2KeepsShapeAndTrackMatte() async throws {
+        let file = try await PAGSceneDecoder.decode(PAGFixtures.data(named: "alpha2.pag"))
+        #expect(file.storage.compositions.contains { $0.layers.contains { if case .shape = $0.content { true } else { false } } })
+        #expect(file.storage.compositions.contains { $0.layers.contains { $0.trackMatte != .none } })
     }
 
     /// 建立只供字段测试使用的独立解码器，逻辑预算与完整文件解码相同。

@@ -54,6 +54,13 @@ enum ShapePreparation {
                 if stroke.isAnimated { result = true }
             case .trimPaths(let trim):
                 if trim.isAnimated { result = true }
+            case .mergePaths:
+                // 固定枚举值没有采样帧轨道，但仍按外层循环收费和响应取消。
+                break
+            case .repeater(let repeater):
+                if repeater.isAnimated { result = true }
+            case .roundCorners(let radius):
+                if radius.isAnimated { result = true }
             case .fill(let fill):
                 if fill.isAnimated { result = true }
             case .group(let transform, let children):

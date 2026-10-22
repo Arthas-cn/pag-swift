@@ -18,7 +18,7 @@ enum SourceMaskMode: UInt8, Sendable {
     case accumulate = 7
 }
 
-/// 图层蒙版的不可变源字段；当前仅内部读取和求值，不附加到场景或生成显示命令。
+/// 图层蒙版的不可变源字段；场景保留完整轨道，逐帧普通路径分支才生成显示裁剪。
 struct SourceMask: Sendable {
     /// 原始引用ID，允许0；后续效果/文本引用与绘制列表是不同职责。
     let id: UInt32

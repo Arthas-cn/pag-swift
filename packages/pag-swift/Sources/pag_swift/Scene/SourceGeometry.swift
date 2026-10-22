@@ -46,6 +46,20 @@ struct SourceShapeTransform: Sendable {
     let skewAxis: Double
 }
 
+/// MergePaths的PathKit操作编号；Append保留原曲线，面积模式当前仅对有限非Conic输入生成单一路径。
+enum SourceMergePathsMode: UInt8, CaseIterable, Sendable {
+    /// Append=0，保留此前各子路径及其原始曲线，不执行面积并集。
+    case merge = 0
+    /// Union=1，将此前路径的面积合成一个结果路径。
+    case add = 1
+    /// Difference=2，从首路径按顺序扣除后续路径。
+    case subtract = 2
+    /// Intersect=3，按顺序保留全部路径共有区域。
+    case intersect = 3
+    /// XOR=4，按顺序保留奇数次覆盖区域。
+    case excludeIntersections = 4
+}
+
 /// 有源码证据的形状元素；排列顺序保留文件语义，路径可随合成帧形变，不在解码时栅格化。
 indirect enum SourceShape: Sendable {
     /// 具有局部变换的形状组；子元素按编码顺序排列，普通混合。
@@ -68,4 +82,10 @@ indirect enum SourceShape: Sendable {
     case gradientStroke(SourceGradientStroke)
     /// 只作用于当前组此前路径的裁剪；正式tag25入口在显示门禁通过前仍关闭。
     case trimPaths(SourceTrimPaths)
+    /// 合并当前组此前递归路径并清空旧节点；关联值决定Append或面积布尔操作。
+    case mergePaths(SourceMergePathsMode)
+    /// 克隆当前组此前已求值的全部元素，保持先前Trim/Merge的结果。
+    case repeater(SourceRepeater)
+    /// 以源半径圆滑当前组此前所有路径的线段角点，不改变已有paint顺序。
+    case roundCorners(SourceProperty<Double>)
 }

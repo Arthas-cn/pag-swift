@@ -1,6 +1,6 @@
-/// TGFX渐变解析参数的后台编译器；不生成纹理，不访问GPU，不缓存跨文档状态。
+/// TGFX渐变颜色程序的后台编译器；纹理分支只保留色标，GPU上传由RenderOwner负责。
 enum GradientColorizer {
-    /// 编译完整双表并保留边色；纹理分支/未定义尾部记录为状态，交后续先判断布局退化。
+    /// 编译完整双表并保留边色；纹理分支暂存已剥hardstop色标，仍先判断布局退化。
     static func prepare(_ source: SourceGradientColors, budget: inout FramePlanBudget) throws -> PreparedGradientColorizer {
         try Task.checkCancellation()
         try GradientStopPreparation.validateCounts(source)
@@ -9,17 +9,29 @@ enum GradientColorizer {
         try budget.reserve(stride: sourceBytes)
         let merged = try GradientStopPreparation.merge(source, budget: &budget)
         let result: GradientColorizerResult
-        if merged.count == 1 { result = .singleColor }
-        else { result = try program(normalized(merged, budget: &budget), budget: &budget) }
+        let textureStops: [GradientStop]?
+        if merged.count == 1 { result = .singleColor; textureStops = nil }
+        else {
+            let stops = try normalized(merged, budget: &budget)
+            result = try program(stops, budget: &budget)
+            if case .requiresTexture = result {
+                let lower = near(stops[0].position, stops[1].position) ? 1 : 0
+                let upper = stops.count - (near(stops[stops.count - 2].position,
+                                                stops[stops.count - 1].position) ? 1 : 0)
+                try budget.reserve(count: upper - lower, stride: MemoryLayout<GradientStop>.stride)
+                textureStops = Array(stops[lower..<upper])
+            } else { textureStops = nil }
+        }
         let coefficientBytes: Int
         switch result {
         case .analytic(.single): coefficientBytes = 64
         case .analytic(.intervals(let intervals)): coefficientBytes = intervals.count * 64
-        case .singleColor, .requiresTexture, .invalidPrecision: coefficientBytes = 0
+        case .requiresTexture: coefficientBytes = (textureStops?.count ?? 0) * MemoryLayout<GradientStop>.stride
+        case .singleColor, .invalidPrecision: coefficientBytes = 0
         }
         try Task.checkCancellation()
         return PreparedGradientColorizer(source: source, first: merged[0].color, last: merged[merged.count - 1].color,
-            result: result, estimatedBytes: sourceBytes + coefficientBytes)
+            result: result, estimatedBytes: sourceBytes + coefficientBytes, textureStops: textureStops)
     }
 
     /// GradientShader补0/1端色后单调夹值；原始超过1的位置会保留为重复1，不能提前去重。
@@ -102,7 +114,8 @@ enum GradientColorizer {
             guard finite(scale), finite(bias) else { return .invalidPrecision }
             intervals.append(GradientColorInterval(upperBound: last.position, scale: scale, bias: bias))
         }
-        guard let last = intervals.last, intervals.count == 8 || last.upperBound >= 1 else { return .invalidPrecision }
+        // TGFX的AppendCode1/2在最后一个else总选末段，t<1的短尾仍按该段外推。
+        guard !intervals.isEmpty else { return .invalidPrecision }
         return .analytic(.intervals(intervals))
     }
 

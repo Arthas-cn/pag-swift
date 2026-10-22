@@ -75,7 +75,8 @@ private actor MetalResourceTestOwner {
         let layer = try #require(frame.plan.commands.compactMap { command -> PAGLayerID? in
             if case .text(let text) = command { text.layerID } else { nil }
         }.first)
-        let commands = [FrameCommand.beginOpacityGroup(FrameOpacityGroup(layerID: layer, opacity: 0.5))]
+        let commands = [FrameCommand.beginOpacityGroup(FrameOpacityGroup(layerID: layer, opacity: 0.5,
+                                                                           application: .composite))]
             + frame.plan.commands + [.endOpacityGroup]
         let grouped = PreparedFrame(plan: FramePlan(time: frame.plan.time, targetBounds: frame.plan.targetBounds, commands: commands),
                                         images: frame.images, shapes: frame.shapes, texts: frame.texts)

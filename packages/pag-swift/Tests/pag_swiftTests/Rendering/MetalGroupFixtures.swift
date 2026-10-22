@@ -23,7 +23,8 @@ enum MetalGroupFixtures {
 
     /// 不增加裁剪的整体alpha边界，数组内的绘制必须先组合再应用该值。
     static func group(_ alpha: Double, _ children: [FrameCommand]) throws -> [FrameCommand] {
-        [.beginOpacityGroup(FrameOpacityGroup(layerID: try layer, opacity: alpha))] + children + [.endOpacityGroup]
+        [.beginOpacityGroup(FrameOpacityGroup(layerID: try layer, opacity: alpha, application: .composite))]
+            + children + [.endOpacityGroup]
     }
 
     /// 实际owner提交的两级重叠透明组，使用验证后的语义图，避免伪造文件格式。
@@ -44,5 +45,29 @@ enum MetalGroupFixtures {
         let root = try SceneFixtures.composition(3, layers: [SceneFixtures.layer(5, transform: half,
                                                                                content: .precomposition(id: 2, startFrame: 0))])
         return try SceneFixtures.build([child, middle, root]).composition
+    }
+
+    /// 两层旋转裁剪的半透明预合成包住相交纯色层，用于无快照消费与实际像素参照。
+    static func rotatedUncachedComposition() throws -> PAGComposition {
+        let size = try PAGSize(width: 40, height: 40)
+        let red = SceneColor(red: 255, green: 0, blue: 0)
+        let shifted = SourceTransformProperties(constant: SourceTransform(anchor: .zero,
+            position: ScenePoint(x: 20, y: 0), scale: .one, rotation: 0, opacity: 255))
+        let leaf = SourceComposition(id: 1, size: size, durationFrames: 30, frameRate: 30,
+            background: SceneColor(red: 0, green: 0, blue: 0), layers: [
+            SceneFixtures.layer(1, content: .solid(size: size, color: red)),
+            SceneFixtures.layer(2, transform: shifted, content: .solid(size: size, color: red))
+        ])
+        let inner = SourceTransformProperties(constant: SourceTransform(anchor: .zero,
+            position: ScenePoint(x: 20, y: 20), scale: .one, rotation: 15, opacity: 128))
+        let middle = try SceneFixtures.composition(2, layers: [
+            SceneFixtures.layer(3, transform: inner, content: .precomposition(id: 1, startFrame: 0))
+        ])
+        let outer = SourceTransformProperties(constant: SourceTransform(anchor: .zero,
+            position: ScenePoint(x: 10, y: 10), scale: .one, rotation: 20, opacity: 128))
+        let root = try SceneFixtures.composition(3, layers: [
+            SceneFixtures.layer(4, transform: outer, content: .precomposition(id: 2, startFrame: 0))
+        ])
+        return try SceneFixtures.build([leaf, middle, root]).composition
     }
 }

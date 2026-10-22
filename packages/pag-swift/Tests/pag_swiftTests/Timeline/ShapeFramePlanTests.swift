@@ -3,7 +3,7 @@ import Testing
 
 /// 从完整形状文件到共享几何与逐帧命令，覆盖资源复用、实例身份、编辑和整体 alpha。
 struct ShapeFramePlanTests {
-    /// red 的真实 group 矩阵和矩形进入实际 FramePlan，不用纯色层替代它的几何。
+    /// red 的真实 group 矩阵和矩形进入实际 FramePlan，Shape候选仅增加可回退的Picture边界。
     @Test func realRedProducesCorrectSharedGeometry() async throws {
         let file = try await PAGLoader().load(data: PAGFixtures.data(named: "red.pag"))
         let scene = try await PreparedScene.prepare(file.composition)
@@ -12,7 +12,8 @@ struct ShapeFramePlanTests {
         let command = try #require(fills(first).first)
         let laterCommand = try #require(fills(later).first)
         let geometry = try #require(first.shapes[command.geometryID])
-        #expect(first.plan.commands.count == 3 && first.shapes.count == 1 && first.images.isEmpty)
+        #expect(first.plan.commands.count == 5 && first.shapes.count == 1 && first.images.isEmpty)
+        #expect(first.plan.commands.contains { if case .beginPicture = $0 { true } else { false } })
         #expect(try command.material.solidColor() == .defaultFill && command.opacity == 1)
         #expect(command.geometryID == laterCommand.geometryID)
         #expect(geometry === later.shapes[laterCommand.geometryID])
@@ -34,7 +35,7 @@ struct ShapeFramePlanTests {
         #expect(try displayMatrix.applying(to: .zero) == ScenePoint(x: 360, y: 360))
     }
 
-    /// 图层和 shape group 的整体 alpha 保持两层边界，内部 fill 的 opacity 不重复相乘。
+    /// 无快照的图层与内部group各自逐draw继承alpha，fill自身opacity不重复相乘。
     @Test func layerAndShapeOpacityRemainSeparateGroups() async throws {
         let group = SourceShapeTransform(base: transform(opacity: 128), skew: 0, skewAxis: 0)
         let contents: [SourceShape] = [.group(group, [rectangle, .fill(color: .defaultFill, opacity: 255),
@@ -45,10 +46,11 @@ struct ShapeFramePlanTests {
         let file = try SceneFixtures.build([source])
         let prepared = try await PreparedScene.prepare(file.composition)
         let frame = try await renderPlan(prepared)
-        let opacities = frame.plan.commands.compactMap { command -> Double? in
-            if case .beginOpacityGroup(let group) = command { group.opacity } else { nil }
+        let groups = frame.plan.commands.compactMap { command -> FrameOpacityGroup? in
+            if case .beginOpacityGroup(let group) = command { group } else { nil }
         }
-        #expect(opacities == [Double(192) / 255, Double(128) / 255])
+        #expect(groups.map(\.opacity) == [Double(192) / 255, Double(128) / 255])
+        #expect(groups.allSatisfy { $0.application == .perDraw })
         #expect(fills(frame).map(\.opacity) == [Double(64) / 255, 1])
         #expect(frame.shapes.count == 1)
         var open = 0

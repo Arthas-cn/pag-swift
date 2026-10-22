@@ -35,6 +35,7 @@ struct ContentView: View {
                 Picker("样例", selection: $sample) {
                     Text("色彩与动画").tag("srgb.pag")
                     Text("红色实底").tag("red.pag")
+                    Text("图层蒙版 AudioMarker").tag("AudioMarker.pag")
                     Text("描边路径 0").tag("0.pag")
                     Text("描边场景 list/0").tag("list/0.pag")
                     Text("描边场景 list/12").tag("list/12.pag")

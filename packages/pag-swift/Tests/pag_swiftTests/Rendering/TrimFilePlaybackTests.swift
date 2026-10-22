@@ -18,12 +18,11 @@ struct TrimFilePlaybackTests {
         print("TRIM_FILE \(name) count=\(values.count) frames=\(root.durationFrames) duration=\(file.composition.duration.microseconds)")
     }
 
-    /// 越过Trim后仍须拒绝后续蒙版或matte，不能以节点能读代替整文件可播放。
-    @Test(arguments: [("list/2.pag", "layerTag:14"), ("like.pag", "trackMatte")])
-    func laterUnsupportedContentStillFails(_ name: String, _ reason: String) async throws {
-        await #expect(throws: PAGError.unsupportedFeature(reason)) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: name))
-        }
+    /// 真实like文件的Trim与轨道遮罩须同处完整源图，不因先读到Trim而丢弃后续遮罩。
+    @Test func likeFileKeepsTrimAndTrackMatte() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "like.pag"))
+        #expect(!trims(in: file).isEmpty)
+        #expect(file.storage.compositions.contains { $0.layers.contains { $0.trackMatte != .none } })
     }
 
     /// 三种布局及倍率遍历所有源帧，真实Metal准备必须成功并归还未提交的局部组附件。

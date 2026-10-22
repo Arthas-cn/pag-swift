@@ -105,7 +105,9 @@ struct PAGSceneDecoder {
                 guard attributes == nil else { throw PAGError.invalidFile(reason: "duplicateCompositionAttributes", offset: nil) }
                 attributes = try readCompositionAttributes(reader: &block.reader)
             case 5 where !isBitmap:
-                layers.append(try readLayer(reader: &block.reader))
+                let layer = try readLayer(reader: &block.reader)
+                // 非首层的邻层引用由场景拓扑验证，再在帧计划和局部Metal效果中成对消费。
+                layers.append(layer)
             case 53, 55:
                 _ = try readCompositionMetadata(code: block.code, reader: &block.reader, audio: &audio, markers: &markers)
             case 46 where isBitmap:

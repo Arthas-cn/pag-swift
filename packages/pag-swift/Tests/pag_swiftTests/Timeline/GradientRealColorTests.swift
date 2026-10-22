@@ -4,9 +4,9 @@ import Testing
 
 /// 真实渐变字段到内部颜色程序的连续性；不经过正式PAG入口，不声明整文件播放支持。
 struct GradientRealColorTests {
-    /// 32个载荷的34份颜色值中32份解析可用，真实精度与容量不足各一份必须保持独立分类。
+    /// 32个载荷的34份颜色值中33份解析可用，另一份超出解析容量走纹理表。
     @Test func realColorValuesMatchVerifiedProgramClassification() throws {
-        var payloadCount = 0, valueCount = 0, invalidCount = 0, textureCount = 0
+        var payloadCount = 0, valueCount = 0, shortTailCount = 0, textureCount = 0
         for url in try PAGFixtures.allPAGURLs() {
             var inspection = ShapeAnimationInspection()
             try inspection.inspect(Data(contentsOf: url))
@@ -29,14 +29,16 @@ struct GradientRealColorTests {
                         continue
                     }
                     if url.lastPathComponent == "zongyi2.pag", payload.range == 326..<370 {
-                        // 原五色末间距near，剥末后剩三有效段且upper<1，源shader在尾部未给系数赋值。
-                        guard case .invalidPrecision = program.result else {
-                            Issue.record("zongyi2必须保留未定义尾部的明确失败")
+                        // 源Unrolled末尾else会选择最后有效段，0.99976至1仍外推其系数。
+                        guard case .analytic(.intervals(let rows)) = program.result else {
+                            Issue.record("zongyi2短尾必须保留解析外推")
                             return
                         }
+                        #expect(rows.count == 3 && rows[2].upperBound < 1)
                         #expect(program.first == SIMD4<Float>(1, 1, 1, 1))
                         #expect(program.last == SIMD4<Float>(177, 141, 228, 255) / 255)
-                        invalidCount += 1
+                        #expect((try GradientColorFixtures.sample(program, at: 0.9999)).x.isFinite)
+                        shortTailCount += 1
                         valueCount += 1
                         continue
                     }
@@ -53,6 +55,6 @@ struct GradientRealColorTests {
                 payloadCount += 1
             }
         }
-        #expect(payloadCount == 32 && valueCount == 34 && invalidCount == 1 && textureCount == 1)
+        #expect(payloadCount == 32 && valueCount == 34 && shortTailCount == 1 && textureCount == 1)
     }
 }

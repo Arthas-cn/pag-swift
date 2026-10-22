@@ -27,6 +27,8 @@ struct MetalStrokeDrawableTests {
             case .encoded(let id, _): encoded.withLock { $0.append(id) }
             case .gpuCompleted(let id, _): completed.withLock { $0.append(id) }
             case .waitingForIdle: break
+            case .pictureMiss: break
+            case .pictureReadyToPublish: break
             }
             // 回调只修改Sendable许可，不在后台触碰窗口，也不在短锁中执行外部代码。
             let action = hook.withLock { $0 }

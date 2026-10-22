@@ -49,5 +49,21 @@ enum MetalGradientMath {
         color.rgb *= color.a;
         return color;
     }
+    /// 纹理分支仍由原边色夹取；256×1输入只覆盖内部0<t<1区间。
+    inline float4 pagGradientTextureSample(float2 q, constant PAGGradientUniforms &gradient,
+                                           texture2d<float> lookup) {
+        float2 unit = float2(dot(gradient.horizontal.xy, q) + gradient.horizontal.z,
+                             dot(gradient.vertical.xy, q) + gradient.vertical.z);
+        float t = gradient.header.x == 0 ? unit.x + 1e-5f : length(unit);
+        float4 color;
+        if (t <= 0) { color = gradient.first; }
+        else if (t >= 1) { color = gradient.last; }
+        else {
+            constexpr sampler inputSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+            color = lookup.sample(inputSampler, float2(t, 0.5));
+        }
+        color.rgb *= color.a;
+        return color;
+    }
     """
 }

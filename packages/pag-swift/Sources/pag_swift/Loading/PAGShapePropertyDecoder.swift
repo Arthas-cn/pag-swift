@@ -49,4 +49,30 @@ extension PAGSceneDecoder {
         try Task.checkCancellation()
         return SourceFill(color: color, opacity: opacity)
     }
+
+    /// 按RepeaterTag九项字段顺序保存原始轨道；此内部读取不解除公开Layer tag26门禁。
+    mutating func readRepeaterProperties(reader: inout PAGByteReader) throws -> SourceRepeater {
+        try Task.checkCancellation()
+        try budget.reserve(512)
+        let flags = try PropertyFlags.read([.flag, .property, .property, .spatialProperty,
+            .spatialProperty, .property, .property, .property, .property], from: &reader)
+        let rawOrder = try flags[0].exists ? reader.readUInt8() : 0
+        guard let order = SourceRepeaterOrder(rawValue: rawOrder) else {
+            throw PAGError.invalidFile(reason: "unknownRepeaterOrder", offset: reader.position - 1)
+        }
+        let copies = try readScalarProperty(flags[1], defaultValue: 3, reader: &reader)
+        let offset = try readScalarProperty(flags[2], defaultValue: 0, reader: &reader)
+        let anchor = try readPointProperty(flags[3], defaultValue: .zero, spatial: true, reader: &reader)
+        let position = try readPointProperty(flags[4], defaultValue: ScenePoint(x: 100, y: 100),
+                                             spatial: true, reader: &reader)
+        let scale = try readPointProperty(flags[5], defaultValue: .one, spatial: false, reader: &reader)
+        let rotation = try readScalarProperty(flags[6], defaultValue: 0, reader: &reader)
+        let startOpacity = try readOpacityProperty(flags[7], reader: &reader)
+        let endOpacity = try readOpacityProperty(flags[8], reader: &reader)
+        try StaticAttributes.requireEnd(of: reader)
+        try Task.checkCancellation()
+        return SourceRepeater(order: order, copies: copies, offset: offset, anchor: anchor,
+                              position: position, scale: scale, rotation: rotation,
+                              startOpacity: startOpacity, endOpacity: endOpacity)
+    }
 }

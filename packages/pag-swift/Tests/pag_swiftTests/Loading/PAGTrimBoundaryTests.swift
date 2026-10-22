@@ -123,9 +123,9 @@ struct PAGTrimBoundaryTests {
         #expect(reader.position == 0 && decoder.budget.used == 256)
     }
 
-    /// 只开放25，不能用连续区间误开Merge/Repeater/RoundCorners；缓存版本同步递增。
-    @Test func adjacentUnsupportedTagsRemainClosedAndRevisionAdvances() async throws {
-        for tag: UInt16 in [24, 26, 27] {
+    /// 相邻未实现Shape标签仍须拒绝，解析修订号随新画面语义开放保持更新。
+    @Test func neighboringUnsupportedShapeTagAndRevisionAdvance() async throws {
+        for tag: UInt16 in [28] {
             var decoder = TrimFixtures.decoder()
             var reader = PAGByteReader(data: Data([0]))
             #expect(throws: PAGError.unsupportedFeature("shapeTag:\(tag)")) {
@@ -134,6 +134,6 @@ struct PAGTrimBoundaryTests {
             #expect(reader.position == 0)
         }
         let snapshot = try await LoadSnapshot.prepare(data: PAGFixtures.data(named: "red.pag"), limits: .standard)
-        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 17)
+        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 30)
     }
 }

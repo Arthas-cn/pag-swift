@@ -16,8 +16,8 @@ enum ShapeRangeFixtures {
             startValue: value, endValue: value, easing: .linear, spatialCurve: nil)])
     }
 
-    /// 按源字段角色逐一注入动画；selected为-1时得到同结构全常量，避免用绘制优化影响期望。
-    static func element(_ family: String, selected: Int) throws -> SourceShape {
+    /// 按源字段角色逐一注入动画；描边可省略Custom dash以核对可选字段的访问边界。
+    static func element(_ family: String, selected: Int, includesDashes: Bool = true) throws -> SourceShape {
         switch family {
         case "group":
             return try .group(ShapePropertyFixtures.group(
@@ -56,13 +56,15 @@ enum ShapeRangeFixtures {
                 miterLimit: property(0, index: 0, selected: selected),
                 color: property(.defaultFill, index: 1, selected: selected),
                 opacity: property(0, index: 2, selected: selected),
-                width: property(0, index: 3, selected: selected), dashes: dashes(firstIndex: 4, selected: selected)))
+                width: property(0, index: 3, selected: selected),
+                dashes: includesDashes ? dashes(firstIndex: 4, selected: selected) : nil))
         case "gradientFill":
             return try .gradientFill(.init(compositeOrder: .belowPrevious, gradient: gradient(firstIndex: 0, selected: selected)))
         case "gradientStroke":
             return try .gradientStroke(GradientShapeFixtures.stroke(gradient(firstIndex: 1, selected: selected),
                 width: property(0, index: 5, selected: selected),
-                miter: property(0, index: 0, selected: selected), dashes: dashes(firstIndex: 6, selected: selected)))
+                miter: property(0, index: 0, selected: selected),
+                dashes: includesDashes ? dashes(firstIndex: 6, selected: selected) : nil))
         case "trim":
             return try .trimPaths(.init(start: property(0, index: 0, selected: selected),
                 end: property(0, index: 1, selected: selected), offset: property(0, index: 2, selected: selected),

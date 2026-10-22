@@ -26,10 +26,26 @@ struct PreparedTextGlyph: Sendable {
     let stroke: GlyphOutline?
     /// 轮廓到文字图层坐标的矩阵，包含竖排 extraMatrix、glyphScale 和基线平移。
     let matrix: SceneAffine
+    /// 文字动画器逐字形累乘的透明度，范围0...1；颜色轮次的alpha另行叠加。
+    let alpha: Double
+    /// 普通布局输出中的原下标；文字路径按行重排后仍能回到真实绘制资源。
+    let layoutIndex: Int
+    /// 已应用glyphScale的横向推进量；路径定位使用其一半对准路径切线。
+    let advance: Double
     /// PreparedTextLayer.fonts 中的实际字体索引，用于维持上游按 style 分组的顺序。
     let fontIndex: Int
     /// 原 Unicode cluster 在输入 UTF-16 中的右开范围，用于诊断，不作为缓存身份。
     let cluster: Range<Int>
+}
+
+/// 文字背景用的单个布局字形指标；空白没有绘制轮廓也必须占用背景宽度。
+struct TextBackgroundGlyph: Sendable {
+    /// 字形原始逻辑边界，供整段文字求全局上下沿。
+    let bounds: TextLayoutBounds
+    /// 当帧总矩阵，含原排版、方向和文字动画器变换。
+    let matrix: SceneAffine
+    /// 当前方向的推进量，已乘布局统一字号比例。
+    let advance: Double
 }
 
 /// 一轮文字绘制；完整执行本轮全部 glyph 后才执行下一轮。
@@ -42,6 +58,8 @@ enum TextPaintPass: Sendable {
 
 /// 场景安装/文本编辑时完成的文字资源；每帧只引用它，不重新整形或生成轮廓。
 final class PreparedTextLayer: Sendable {
+    /// 本次文字资源所属的已验证源图层，Picture范围不能伪造另一源的缓存键。
+    let source: SourceLayerReference
     /// 本次准备的稳定资源代数，多实例和多帧保持相同。
     let identity: TextResourceID
     /// 此资源实际使用的完整编辑样式，用于显式复用时检查失效。
@@ -52,6 +70,10 @@ final class PreparedTextLayer: Sendable {
     let passes: [TextPaintPass]
     /// 按 PAG 源规则得到的逻辑布局，字体 bounds 不代表实际像素覆盖。
     let layout: TextLayoutResult
+    /// 与普通布局每个位置对齐的推进量，含没有轮廓的空白glyph，供路径强制对齐求值。
+    let layoutAdvances: [Double]
+    /// 与每个可布局glyph对齐的背景指标；背景禁用时为空，不丢掉空白宽度。
+    let backgroundGlyphs: [TextBackgroundGlyph]
     /// 本次实际使用的字体及回退诊断，数组顺序与 fontIndex 一致。
     let fonts: [TextFontInfo]
     /// 整形输出中 glyph ID 为0的输入索引；按上游规则没有路径或 advance。
@@ -59,14 +81,19 @@ final class PreparedTextLayer: Sendable {
     /// 完整准备的保守逻辑计费，显式复用时也要满足新调用的预算。
     let estimatedBytes: Int
 
-    /// 保存完整准备结果；失败时调用方不构造/发布该对象。
-    init(style: PAGText, glyphs: [PreparedTextGlyph], passes: [TextPaintPass], layout: TextLayoutResult,
+    /// 保存源层身份与完整准备结果；失败时调用方不构造/发布该对象。
+    init(source: SourceLayerReference, style: PAGText, glyphs: [PreparedTextGlyph],
+         passes: [TextPaintPass], layout: TextLayoutResult, layoutAdvances: [Double],
+         backgroundGlyphs: [TextBackgroundGlyph] = [],
          fonts: [TextFontInfo], missingGlyphIndices: [Int], estimatedBytes: Int) {
+        self.source = source
         identity = TextResourceID(generation: UUID())
         self.style = style
         self.glyphs = glyphs
         self.passes = passes
         self.layout = layout
+        self.layoutAdvances = layoutAdvances
+        self.backgroundGlyphs = backgroundGlyphs
         self.fonts = fonts
         self.missingGlyphIndices = missingGlyphIndices
         self.estimatedBytes = estimatedBytes

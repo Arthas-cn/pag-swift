@@ -3,14 +3,23 @@ import Testing
 
 /// 真实文本和编辑快照从 Loader/语义场景进入 FramePlan；不把计划通过当作 GPU 已显示。
 struct TextFramePlanTests {
-    /// 完整 TEXT04 使用真实字体/字形并生成两轮计划，跨帧共享资源而不是重新排版。
+    /// 完整 TEXT04 使用真实字体/字形与两轮原命令，静态候选增加成对Picture但跨帧仍共享资源。
     @Test func realTextFileProducesSharedStrokeThenFillPlan() async throws {
         let file = try await PAGLoader().load(data: PAGFixtures.data(named: "editing/TEXT04.pag"))
         let scene = try await PreparedScene.prepare(file.composition)
         let first = try await frame(scene)
         let later = try await frame(scene, time: PAGTime(microseconds: 10_000_000))
         let commands = texts(first)
-        #expect(commands.count == 2 && first.plan.commands.count == 4)
+        #expect(commands.count == 2 && first.plan.commands.count == 6)
+        guard case .beginPicture(let picture) = first.plan.commands[1],
+              case .text = first.plan.commands[2], case .text = first.plan.commands[3],
+              case .endPicture = first.plan.commands[4],
+              case .text(let resourceID, let instanceID) = picture.content else {
+            Issue.record("静态文字Picture必须只包完整原始轮次")
+            return
+        }
+        #expect(picture.source == scene.texts.keys.first && picture.document == instanceID.document)
+        #expect(resourceID == commands[0].resourceID && instanceID == commands[0].layerID)
         #expect(commands.map(\.passIndex) == [0, 1] && first.texts.count == 1)
         let prepared = try #require(first.texts[commands[0].resourceID])
         #expect(prepared === later.texts[commands[0].resourceID])
@@ -45,6 +54,24 @@ struct TextFramePlanTests {
         #expect(newText !== oldText && newText.identity != oldText.identity)
         #expect(newText.glyphs.count == 2 && newText.glyphs[0].fill === newText.glyphs[1].fill)
         #expect(oldFrame.texts[oldText.identity]?.glyphs.count == 9)
+        let firstEdited = try await frame(edited)
+        let firstMarker = try #require(firstEdited.plan.commands.compactMap { command -> FramePicture? in
+            if case .beginPicture(let marker) = command { marker } else { nil }
+        }.first)
+        text.text = "BB"
+        try composition.replaceText(text, at: 0)
+        let secondEdited = try await PreparedScene.prepare(composition, reusing: edited)
+        let secondFrame = try await frame(secondEdited)
+        let secondMarker = try #require(secondFrame.plan.commands.compactMap { command -> FramePicture? in
+            if case .beginPicture(let marker) = command { marker } else { nil }
+        }.first)
+        guard case .text(let firstID, _) = firstMarker.content,
+              case .text(let secondID, _) = secondMarker.content else {
+            Issue.record("同字数编辑仍须生成Text Picture身份")
+            return
+        }
+        // 两次编辑均为两个字形，同源和尺寸不足以证明内容相同，代数必须变化。
+        #expect(firstMarker.source == secondMarker.source && firstID != secondID)
         try composition.replaceText(nil, at: 0)
         let restored = try await PreparedScene.prepare(composition, reusing: original)
         #expect(restored.texts[key] === oldText)
@@ -68,7 +95,7 @@ struct TextFramePlanTests {
         #expect(commands.map(\.matrix.tx) == [50, 0] && commands[0].resourceID == commands[1].resourceID)
     }
 
-    /// 图层 alpha 包住两轮文字，不分摊到 fill/stroke；只有根合成添加 clip。
+    /// 文字外层alpha包住可选Picture与原始两轮，回退时仍按每次glyph继承且无文本框clip。
     @Test func textLayerOpacityWrapsBothPassesWithoutBoxClip() async throws {
         var style = try TextFixtures.source().style
         style.strokeColor = try PAGColor(red: 1, green: 0, blue: 0)
@@ -80,12 +107,15 @@ struct TextFramePlanTests {
         ])
         let scene = try await PreparedScene.prepare(SceneFixtures.build([root]).composition)
         let result = try await frame(scene)
-        #expect(result.plan.commands.count == 6 && texts(result).count == 2)
-        guard case .beginOpacityGroup(let group) = result.plan.commands[1], case .endOpacityGroup = result.plan.commands[4] else {
+        #expect(result.plan.commands.count == 8 && texts(result).count == 2)
+        guard case .beginOpacityGroup(let group) = result.plan.commands[1],
+              case .beginPicture = result.plan.commands[2], case .endPicture = result.plan.commands[5],
+              case .endOpacityGroup = result.plan.commands[6] else {
             Issue.record("文本整体 alpha 必须包住两次绘制")
             return
         }
         #expect(group.opacity == Double(128) / 255)
+        #expect(group.application == .perDraw)
         #expect(result.plan.commands.filter { if case .beginGroup = $0 { true } else { false } }.count == 1)
     }
 

@@ -59,13 +59,11 @@ extension PAGSceneDecoder {
         return ScenePoint(x: Double(x), y: Double(y))
     }
 
-    /// 四个有符号分量以 0.005 精度编码 out/in 控制点；x 必须可作单调时间查询。
+    /// 四个有符号分量以0.005精度编码；上游允许x越过单位区间，仍按原折线二分。
     private mutating func readTimingCurve(width: Int, reader: inout PAGByteReader) throws -> SampledCurve {
         let first = try packedPoint(width: width, precision: 0.005, reader: &reader)
         let second = try packedPoint(width: width, precision: 0.005, reader: &reader)
-        guard (0...1).contains(first.x), (0...1).contains(second.x) else {
-            throw SceneValidator.invalid("invalidTimingControlPoint")
-        }
+        // TextAnimatorX7的真实缩放轨道包含越界x；提前钳位或拒绝都会改变源曲线。
         return try SampledCurve.make(start: .zero, control1: first, control2: second, end: .one,
                                      precision: 0.005, budget: &budget)
     }

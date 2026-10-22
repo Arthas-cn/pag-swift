@@ -88,7 +88,7 @@ struct VideoPlanningTests {
 
 /// 由真实视频块构建明确标注的语义图，只检验计划与渲染组合，不声称它是另一个导出的PAG文件。
 enum VideoPlanningFixtures {
-    /// 把同一视频放入多个实例，再用可选整体alpha的预合成包装，方便核对折叠和局部组语义。
+    /// 把同一视频放入多个实例，再用可选alpha的预合成包装，核对无快照逐draw及输入复用。
     static func nested(starts: [Int64], opacity: UInt8 = 255) async throws -> PAGFile {
         let source = try await PAGVideoFixtures.source(in: "RootLayerVideo.pag")
         let layers = starts.enumerated().map { index, start in

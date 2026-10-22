@@ -69,7 +69,7 @@ struct GradientTransformTests {
         #expect(throws: PAGError.renderingFailure("gradientPrecision")) { try mapped(normal, origin: ScenePoint(x: .infinity, y: 0)) }
     }
 
-    /// 超过16色的颜色程序不可解析，零长度仍优先取完整RGBA；Linear首色与Radial末色不同。
+    /// 超过16色改用输入LUT，零长度仍优先取完整RGBA；非退化布局继续提供单位坐标。
     @Test(arguments: [SourceGradientKind.linear, .radial])
     func degeneracyPrecedesProgramAndInverseFailures(_ kind: SourceGradientKind) throws {
         let colors = GradientColorFixtures.colors(rgb: (0...16).map {
@@ -85,14 +85,17 @@ struct GradientTransformTests {
             #expect(color == (kind == .linear ? program.first : program.last))
         }
         let nondegenerate = try gradient(kind: kind, end: ScenePoint(x: Double(threshold.nextUp), y: 0), colorizer: program)
-        #expect(throws: PAGError.unsupportedFeature("gradientTextureColorizer")) { try GradientTransform.layout(for: nondegenerate) }
+        guard case .mapped = try GradientTransform.layout(for: nondegenerate) else {
+            Issue.record("非退化纹理渐变必须保留可用布局"); return
+        }
     }
 
-    /// invalidPrecision颜色状态也必须等布局退化之后处理，同程序退化往返不能缓存成永远可画。
+    /// 真正无有效区间的颜色状态仍须等布局退化之后处理，不能缓存成永远可画。
     @Test func invalidProgramIsDeferredUntilNondegenerate() throws {
         let program = try GradientColorFixtures.compile(GradientColorFixtures.colors(
-            rgb: [0, 1, 2, 49998, 49999, 50000].map { (Float($0) * 0.00002, GradientColorFixtures.red) }))
-        guard case .invalidPrecision = program.result else { Issue.record("夹具应有未定义尾部"); return }
+            rgb: [(1.1, GradientColorFixtures.red), (1.2, GradientColorFixtures.blue)],
+            alpha: [(1.1, 255), (1.2, 255)]))
+        guard case .invalidPrecision = program.result else { Issue.record("夹具应没有有效区间"); return }
         for length: Double in [0, 4, 0] {
             let value = try gradient(end: ScenePoint(x: length, y: 0), colorizer: program)
             if length == 0 {

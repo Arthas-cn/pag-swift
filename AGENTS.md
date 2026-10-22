@@ -15,6 +15,8 @@
 
 `xcodebuild`、安装 demo、启动模拟器或选择 `-destination` 前：走 `ios-device-destination`，先跑其脚本。库测试能 `swift test` 则不要选设备。
 
+macOS demo 可见验收由当前主任务串行调度；内部小段先做针对性库测试和必要的挂载 drawable 像素验证，不启动 Demo，也不再重复清点 Demo 进程、窗口或磁盘旧 `.app`。用户已确认当前 Demo 状态正确，历史清点不属于后续功能验收。正式可见验收时只复用当前可控构建和已有窗口；不代为退出用户/Xcode实例，不用 `open -n`、复制/改名临时 App 或每小段新开窗口。入口保持单例 `Window`，Demo 构建固定复用 `/private/tmp/pag-swift-macos-derived`。只有真正需要正式窗口画面时才操作 Demo，并直接核对实际画面；构建成功、状态 PASS 和窗口存在都不能代替画面。若桌面不可见或画面无法读取，记录待验收项后继续实现，不围绕进程/窗口清点反复重试。
+
 ## 技术栈
 
 - 语言：Swift 6.4（Xcode 27 自带编译器）。工程写 `SWIFT_VERSION = 6.4`；Xcode 会映射为语言模式 Swift 6（`EFFECTIVE_SWIFT_VERSION = 6`）。按严格并发来写，并使用 Swift 6.4 语法。不要改回 `6.0` 或 5。库与 demo 都开启 Approachable Concurrency。**库的默认 actor isolation 为 `nonisolated`。**

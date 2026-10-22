@@ -24,16 +24,26 @@ struct GradientFilePlaybackTests {
         print("GRADIENT_FILE \(name) colors=\(values.map { $0.colors.initialValue.colorStops.count }) duration=\(file.composition.duration.microseconds)")
     }
 
-    /// 复杂alpha样例可完整解码，但可见材料超出解析容量时必须在Metal准备失败，不降级或漏画。
-    @Test func completeAlphaFileFailsAtVisibleMaterial() async throws {
+    /// 复杂alpha文件超出解析八段时，正式Metal输入须保留256×1查色纹理并正常准备。
+    @Test func completeAlphaFilePreparesTextureMaterial() async throws {
         let file = try await PAGLoader().load(data: PAGFixtures.data(named: "gradient/grad_alpha.pag"))
         #expect(!gradients(in: file).isEmpty)
         let scene = try await PreparedScene.prepare(file.composition)
         let frame = try await FramePlanner.prepare(scene, at: .zero, targetSize: file.composition.size, scale: 1, mode: .none)
-        let owner = try GradientFileMetalOwner(device: #require(MTLCreateSystemDefaultDevice()))
-        await #expect(throws: PAGError.unsupportedFeature("gradientTextureColorizer")) {
-            try await owner.prepare(frame, width: Int(file.composition.size.width), height: Int(file.composition.size.height))
-        }
+        let resources = try MetalResources(device: try #require(MTLCreateSystemDefaultDevice()))
+        let batch = try MetalFramePreparation.prepare(frame, width: Int(file.composition.size.width),
+            height: Int(file.composition.size.height), resources: resources)
+        #expect(batch.passes.flatMap(\.draws).contains { $0.gradient != nil && $0.texture?.width == 256 && $0.texture?.height == 1 })
+        let first = try #require(batch.passes.flatMap(\.draws).first(where: { $0.gradient != nil })?.texture)
+        batch.releaseTransients()
+        #expect(resources.groups.activeBytes == 0)
+        // 同一准备资源重复绘制只借缓存纹理，不能每帧重建输入表。
+        let again = try MetalFramePreparation.prepare(frame, width: Int(file.composition.size.width),
+            height: Int(file.composition.size.height), resources: resources)
+        let reused = try #require(again.passes.flatMap(\.draws).first(where: { $0.gradient != nil })?.texture)
+        #expect(first === reused)
+        again.releaseTransients()
+        #expect(resources.groups.activeBytes == 0)
     }
 
     /// 三种尺寸/倍率下遍历每个源帧，并准备真实GPU网格及渐变常量；成功必须归还局部附件。

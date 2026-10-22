@@ -23,6 +23,67 @@ struct MetalGroupTests {
         try await owner.verifySimple()
     }
 
+    /// 无快照预合成的外层alpha逐draw消费，重叠子层不能借整体合成附件。
+    @Test func uncachedCompositionInheritsAlphaPerDraw() async throws {
+        let owner = MetalGroupTestOwner(device: try #require(MTLCreateSystemDefaultDevice()))
+        try await owner.verifyUncachedComposition()
+    }
+
+    /// 静态Shape/Text虽满足Picture候选，未建立快照的生产帧仍逐draw且零外层附件。
+    @Test func eligibleContentWithoutSnapshotUsesPerDraw() async throws {
+        let half = SourceTransformProperties(constant: SourceTransform(anchor: .zero, position: .zero,
+            scale: .one, rotation: 0, opacity: 128))
+        let rectangle = SourceShape.rectangle(reversed: false, size: ScenePoint(x: 40, y: 40),
+                                               position: ScenePoint(x: 40, y: 40), roundness: 0)
+        let shape = try SceneFixtures.composition(1, layers: [SceneFixtures.layer(1, transform: half,
+            content: .shape([rectangle, .fill(color: SceneColor(red: 255, green: 0, blue: 0), opacity: 255),
+                             .fill(color: SceneColor(red: 0, green: 0, blue: 255), opacity: 255)]))])
+        var style = try TextFixtures.source().style
+        style.strokeColor = try PAGColor(red: 1, green: 0, blue: 0)
+        style.strokeWidth = 2
+        let text = try SceneFixtures.composition(2, layers: [SceneFixtures.layer(2, transform: half,
+            content: .text(try TextFixtures.source(style: style)))])
+        let owner = MetalGroupTestOwner(device: try #require(MTLCreateSystemDefaultDevice()))
+        for source in [shape, text] {
+            let file = try SceneFixtures.build([source])
+            let scene = try await PreparedScene.prepare(file.composition)
+            var budget = FramePlanBudget(limit: 1_000_000)
+            let indices = [source.id: 0]
+            let ranges = try VectorStaticRanges.make(compositions: [source], indices: indices, budget: &budget)
+            let candidate = try PictureCandidates.make(compositions: [source], indices: indices,
+                                                       vectorRanges: ranges, budget: &budget)
+            #expect(candidate.layerContent == [[true]])
+            let frame = try await FramePlanner.prepare(scene, at: .zero, targetSize: source.size, scale: 1, mode: .none)
+            let group = try #require(frame.plan.commands.compactMap { command -> FrameOpacityGroup? in
+                if case .beginOpacityGroup(let value) = command { value } else { nil }
+            }.first)
+            #expect(group.application == .perDraw && group.opacity == Double(128) / 255)
+            try await owner.verifyUncachedEligible(frame)
+        }
+    }
+
+    /// 两层旋转预合成的定义clip保留在组内，候选外层alpha逐draw消费且不创建附件。
+    @Test func rotatedNestedCompositionsPreserveDirectDrawing() async throws {
+        let composition = try MetalGroupFixtures.rotatedUncachedComposition()
+        let scene = try await PreparedScene.prepare(composition)
+        let frame = try await FramePlanner.prepare(scene, at: .zero, targetSize: composition.size,
+                                                   scale: 1, mode: .none)
+        let groups = frame.plan.commands.compactMap { command -> FrameGroup? in
+            if case .beginGroup(let value) = command { value } else { nil }
+        }
+        #expect(groups.count == 3 && groups.allSatisfy { $0.application == .perDraw })
+        #expect(groups.dropFirst().allSatisfy { abs($0.clip.matrix.b) > 0.1 })
+        #expect(groups[1].opacity == Double(128) / 255)
+        #expect(groups[2].opacity == 1)
+        let alphaGroups = frame.plan.commands.compactMap { command -> FrameOpacityGroup? in
+            if case .beginOpacityGroup(let value) = command { value } else { nil }
+        }
+        #expect(alphaGroups.count == 1)
+        #expect(alphaGroups.allSatisfy { $0.opacity == Double(128) / 255 && $0.application == .perDraw })
+        #expect(alphaGroups.first?.layerID == groups[2].layerID)
+        try await MetalGroupTestOwner(device: try #require(MTLCreateSystemDefaultDevice())).verifyRotatedUncached(frame)
+    }
+
     /// 已经生成附件后遇到非法计划，准备整体失败并归还全部活动借用。
     @Test func failedPreparationReturnsBorrowedAttachments() async throws {
         let owner = MetalGroupTestOwner(device: try #require(MTLCreateSystemDefaultDevice()))
@@ -99,6 +160,45 @@ private actor MetalGroupTestOwner {
         let invisible = try Self.prepare(MetalGroupFixtures.group(0.5, [MetalGroupFixtures.solid(x: 200), MetalGroupFixtures.solid(x: 210)]), resources)
         defer { invisible.releaseTransients() }
         #expect(invisible.loans.isEmpty && invisible.drawCount == 0)
+    }
+
+    /// 根矩形裁剪随两次实际绘制继承，均乘半透明且没有中间附件。
+    func verifyUncachedComposition() throws {
+        let resources = try MetalResources(device: device)
+        let clip = FrameClip(size: try PAGSize(width: 80, height: 80), matrix: .identity)
+        let commands: [FrameCommand] = [
+            .beginGroup(FrameGroup(layerID: nil, frame: 0, clip: clip, opacity: 0.5, application: .perDraw)),
+            try MetalGroupFixtures.solid(), try MetalGroupFixtures.solid(x: 20), .endGroup
+        ]
+        let batch = try Self.prepare(commands, resources)
+        defer { batch.releaseTransients() }
+        #expect(batch.passes.count == 1 && batch.loans.isEmpty)
+        let draws = try #require(batch.passes.last).draws
+        #expect(draws.count == 2)
+        #expect(draws.allSatisfy { $0.uniforms.color.w == 0.5 && $0.clips.count == 1 })
+    }
+
+    /// 实际源计划不因候选true就生成临时组合纹理；多paint或glyph仍各自消耗外层alpha。
+    func verifyUncachedEligible(_ frame: PreparedFrame) throws {
+        let resources = try MetalResources(device: device)
+        let batch = try MetalFramePreparation.prepare(frame, width: 100, height: 100, resources: resources)
+        defer { batch.releaseTransients() }
+        #expect(batch.passes.count == 1 && batch.loans.isEmpty && resources.groups.activeBytes == 0)
+        let draws = try #require(batch.passes.last).draws
+        #expect(draws.count > 1)
+        #expect(draws.allSatisfy { abs($0.uniforms.color.w - Float(128.0 / 255)) < 0.0001 })
+    }
+
+    /// 旋转后的三个真实clip同时附着于两个叶draw，继承alpha的乘积不生成局部纹理。
+    func verifyRotatedUncached(_ frame: PreparedFrame) throws {
+        let resources = try MetalResources(device: device)
+        let batch = try MetalFramePreparation.prepare(frame, width: 100, height: 100, resources: resources)
+        defer { batch.releaseTransients() }
+        #expect(batch.passes.count == 1 && batch.loans.isEmpty)
+        let draws = try #require(batch.passes.last).draws
+        let alpha = Float(128.0 / 255) * Float(128.0 / 255)
+        #expect(draws.count == 2)
+        #expect(draws.allSatisfy { $0.clips.count == 3 && abs($0.uniforms.color.w - alpha) < 0.0001 })
     }
 
     /// 关闭多图元组后才出现错误，确保覆盖已经借出纹理的失败清理路径。

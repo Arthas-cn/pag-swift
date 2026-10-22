@@ -52,7 +52,11 @@ struct GradientTransform: Sendable, Equatable {
         }
         switch gradient.colorizer.result {
         case .analytic: break
-        case .requiresTexture: throw PAGError.unsupportedFeature("gradientTextureColorizer")
+        case .requiresTexture:
+            // 测试手工构造的缺色标状态不能用空LUT伪造成功；正式编译会同时保存规范化色标。
+            guard gradient.colorizer.textureStops != nil else {
+                throw PAGError.unsupportedFeature("gradientTextureColorizer")
+            }
         case .invalidPrecision: throw PAGError.renderingFailure("gradientPrecision")
         case .singleColor: return .solid(gradient.colorizer.first)
         }

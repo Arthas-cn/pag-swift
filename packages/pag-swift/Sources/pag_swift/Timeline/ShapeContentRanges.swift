@@ -6,8 +6,16 @@ enum ShapeContentRanges {
         guard case .shape(let elements) = layer.content else { throw SceneValidator.invalid("expectedShapeContent") }
         var result = try StaticFrameRanges(startFrame: layer.startFrame, duration: layer.durationFrames, budget: &budget)
         // 上游ContentCache先按所属合成帧排除内容变化，最后才换算为内容局部帧。
-        try exclude(elements, from: &result, depth: 0, budget: &budget)
+        result = try excluding(elements, from: result, budget: &budget)
         return try result.relative(to: layer.startFrame, budget: &budget)
+    }
+
+    /// 在任意父合成静态范围上排除Shape内容轨道；供Vector按Layer轨道之后复用源遍历顺序。
+    static func excluding(_ elements: [SourceShape], from ranges: StaticFrameRanges,
+                          budget: inout FramePlanBudget) throws -> StaticFrameRanges {
+        var result = ranges
+        try exclude(elements, from: &result, depth: 0, budget: &budget)
+        return result
     }
 
     /// 按源编码顺序遍历；即使范围已空仍验证后续深度和预算，不按可见paint删属性。
@@ -65,6 +73,20 @@ enum ShapeContentRanges {
                 try exclude(value.start, from: &result, budget: &budget)
                 try exclude(value.end, from: &result, budget: &budget)
                 try exclude(value.offset, from: &result, budget: &budget)
+            case .mergePaths:
+                // MergePaths是固定操作，静态性只取决于它消费的此前路径属性。
+                break
+            case .repeater(let value):
+                try exclude(value.copies, from: &result, budget: &budget)
+                try exclude(value.offset, from: &result, budget: &budget)
+                try exclude(value.anchor, from: &result, budget: &budget)
+                try exclude(value.position, from: &result, budget: &budget)
+                try exclude(value.scale, from: &result, budget: &budget)
+                try exclude(value.rotation, from: &result, budget: &budget)
+                try exclude(value.startOpacity, from: &result, budget: &budget)
+                try exclude(value.endOpacity, from: &result, budget: &budget)
+            case .roundCorners(let radius):
+                try exclude(radius, from: &result, budget: &budget)
             }
         }
     }

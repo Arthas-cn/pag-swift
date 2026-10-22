@@ -147,7 +147,8 @@ struct PAGPlayerDisplayTests {
 
     /// GPU完成回调被控制屏障暂停时交接绑定，二者等实际owner退出后才能继续。
     @MainActor @Test func transferWaitsForCompletedOwnerToExit() async throws {
-        let signals = AsyncStream.makeStream(of: RenderEvent.self, bufferingPolicy: .bufferingNewest(1))
+        // 一次GPU完成后还会发Picture发布诊断，单槽会丢掉屏障等待的gpuCompleted事件。
+        let signals = AsyncStream.makeStream(of: RenderEvent.self, bufferingPolicy: .bufferingNewest(32))
         let stopOnce = Mutex(false)
         let proceed = DispatchSemaphore(value: 0)
         let device = try #require(MTLCreateSystemDefaultDevice())

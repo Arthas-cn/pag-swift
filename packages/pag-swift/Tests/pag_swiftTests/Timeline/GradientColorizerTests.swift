@@ -89,18 +89,21 @@ struct GradientColorizerTests {
         }
     }
 
-    /// 超出1规范化后的Dual除零、Unrolled不足八段的未定义尾部都记录失败，不能外推末段。
-    @Test func nonfiniteAndUndefinedTailAreDeferredStates() throws {
+    /// 完全无有效段仍失败；末阈值略低于1时源Unrolled实际沿最后有效段外推。
+    @Test func nonfiniteFailsButShortTailUsesLastInterval() throws {
         let beyond = [Float(55000) * 0.00002, Float(60000) * 0.00002]
         let first = GradientColorFixtures.colors(rgb: [(beyond[0], GradientColorFixtures.red), (beyond[1], GradientColorFixtures.blue)],
                                                  alpha: beyond.map { ($0, 255) })
         let positions = [0, 1, 2, 49998, 49999, 50000].map { Float($0) * 0.00002 }
         let second = GradientColorFixtures.colors(rgb: positions.map { ($0, GradientColorFixtures.red) })
-        for source in [first, second] {
-            let value = try GradientColorFixtures.compile(source)
-            guard case .invalidPrecision = value.result else { Issue.record("应记录invalidPrecision"); return }
-            #expect(value.first == SIMD4<Float>(1, 0, 0, 1))
+        let invalid = try GradientColorFixtures.compile(first)
+        guard case .invalidPrecision = invalid.result else { Issue.record("无有效段须记录invalidPrecision"); return }
+        let valid = try GradientColorFixtures.compile(second)
+        guard case .analytic(.intervals(let intervals)) = valid.result else {
+            Issue.record("短尾须使用源Unrolled最后有效段"); return
         }
+        #expect(intervals.count == 1 && intervals[0].upperBound < 1)
+        #expect(try GradientColorFixtures.sample(valid, at: 0.99998) == SIMD4<Float>(1, 0, 0, 1))
     }
 
     /// 只有原合并项数为一才走singleColor，不能因所有颜色相同跳过正常解析容量或矩阵语义。

@@ -46,13 +46,13 @@ struct PAGCompositionAudioTests {
         #expect(markers.map(\.startFrame) == [7, 3] && markers.map(\.comment) == ["", ""])
     }
 
-    /// 原本没有音频的真实文件仍保持缺省空值，正式缓存版本与元数据接通同时递增。
+    /// 没有音频的真实文件仍保持缺省空值，解析缓存版本须与当前画面支持范围一致。
     @Test func absentMetadataAndRevision() async throws {
         let data = try PAGFixtures.data(named: "red.pag")
         let file = try await PAGLoader().load(data: data)
         #expect(file.storage.compositions.allSatisfy { $0.audio == nil && $0.audioMarkers.isEmpty })
         let snapshot = try await LoadSnapshot.prepare(data: data, limits: .standard)
-        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 17)
+        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 30)
     }
 
     /// TagHeader.h的短载荷编码；只用于已取证53/55字段，所有输入均小于63字节。

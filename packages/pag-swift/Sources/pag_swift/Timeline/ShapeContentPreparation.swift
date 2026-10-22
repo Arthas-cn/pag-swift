@@ -1,3 +1,5 @@
+import Foundation
+
 /// 第一遍只保存源paint及其原组坐标，第二遍才引用完成全部modifier的路径。
 enum ShapeSourcePaint: Sendable {
     /// 普通颜色填充，不冻结当前路径数组。
@@ -66,6 +68,12 @@ struct ShapeContentPreparation {
                 nodes.append(.group(opacity: value.opacity, children: child))
             case .trimPaths(let source):
                 try trim(source, nodes: nodes)
+            case .mergePaths(let mode):
+                try merge(mode, nodes: &nodes)
+            case .repeater(let source):
+                try applyRepeater(source, nodes: &nodes, depth: depth)
+            case .roundCorners(let radius):
+                try roundCorners(radius, nodes: nodes, matrix: matrix)
             default:
                 // 只有真正无verb的源Path会落到这里，不制造一个可被paint引用的空源轮廓。
                 continue
@@ -102,6 +110,110 @@ struct ShapeContentPreparation {
         let bytes = max(512, MemoryLayout<ShapeSourcePaint>.stride + MemoryLayout<SceneAffine>.stride + 128)
         try budget.reserve(stride: bytes)
         return .paint(source, matrix: matrix)
+    }
+
+    /// 圆滑当前组此前递归路径，保留原节点及paint对路径槽位的引用。
+    private mutating func roundCorners(_ property: SourceProperty<Double>, nodes: [ShapeContentNode],
+                                       matrix: SceneAffine) throws {
+        var radius = Float(try PropertyEvaluation.scalar(property, at: frame))
+        guard radius.isFinite else { throw SceneValidator.invalid("unrepresentableRoundCornersRadius") }
+        guard radius > 0 else { return }
+        let scale = try maximumScale(of: matrix)
+        if scale > 0 { radius *= scale }
+        guard radius.isFinite else { throw SceneValidator.invalid("unrepresentableRoundCornersRadius") }
+        try budget.reserve(count: nodes.count, stride: 128)
+        var stack = Array(nodes.reversed())
+        var ids: [Int] = []
+        while let node = stack.popLast() {
+            try geometryBudget.consume()
+            switch node {
+            case .path(let id):
+                try budget.reserve(stride: 16)
+                ids.append(id)
+            case .group(_, let children):
+                try budget.reserve(count: children.count, stride: 128)
+                stack.append(contentsOf: children.reversed())
+            case .paint: break
+            }
+        }
+        for id in ids {
+            try Task.checkCancellation()
+            let source = try TrimPathConversion.make(paths[id], budget: &geometryBudget)
+            let result = try RoundCornersPathEffect.apply(source, radius: radius, budget: &geometryBudget)
+            let rounded = try PreparedTrimPath(result)
+            try budget.reserve(stride: rounded.estimatedBytes)
+            paths[id] = .trimmed(rounded)
+        }
+    }
+
+    /// 复现上游Matrix::getMaxScale的最大奇异值，供组矩阵后的圆角半径使用。
+    private func maximumScale(of matrix: SceneAffine) throws -> Float {
+        let a = Float(matrix.a), b = Float(matrix.b), c = Float(matrix.c), d = Float(matrix.d)
+        let first = a * a + b * b
+        let second = c * c + d * d
+        let cross = a * c + b * d
+        let crossSquared = cross * cross
+        let maximumSquared: Float
+        if crossSquared <= (1.0 / 4096) * (1.0 / 4096) {
+            // TGFX Matrix::getMinMaxScaleFactors对近乎零的列内积直接取较大平方范数。
+            maximumSquared = max(first, second)
+        } else {
+            maximumSquared = (first + second) * 0.5
+                + sqrt((first - second) * (first - second) + 4 * crossSquared) * 0.5
+        }
+        let value = sqrt(max(maximumSquared, 0))
+        guard value.isFinite else { throw SceneValidator.invalid("unrepresentableRoundCornersScale") }
+        return value
+    }
+
+    /// 递归收集此前Path，Append或Boolean合成单条结果路径并清除此前paint与子组。
+    private mutating func merge(_ mode: SourceMergePathsMode, nodes: inout [ShapeContentNode]) throws {
+        try budget.reserve(count: nodes.count, stride: 128)
+        var stack = Array(nodes.reversed())
+        var inputs: [ShapeContour] = []
+        while let node = stack.popLast() {
+            try geometryBudget.consume()
+            switch node {
+            case .path(let id):
+                try budget.reserve(stride: 192)
+                inputs.append(paths[id])
+            case .group(_, let children):
+                try budget.reserve(count: children.count, stride: 128)
+                stack.append(contentsOf: children.reversed())
+            case .paint: break
+            }
+        }
+        // 上游pathList为空时不清组，已有Paint与透明子组均原样保留。
+        guard !inputs.isEmpty else { return }
+        // 上游以首路径为结果初值；只有第二条起才执行PathOp，单路径对五种模式均相同。
+        var sourcePaths: [StrokePath] = []
+        try geometryBudget.reserve(inputs.count, stride: 64)
+        for contour in inputs {
+            try geometryBudget.consume()
+            sourcePaths.append(try TrimPathConversion.make(contour, budget: &geometryBudget))
+        }
+        var verbs: [StrokePathVerb] = []
+        var points: [ScenePoint] = []
+        let path: StrokePath
+        if mode == .merge || sourcePaths.count == 1 {
+            for source in sourcePaths {
+                try geometryBudget.consume()
+                try geometryBudget.reserve(source.verbs.count, stride: 16)
+                try geometryBudget.reserve(source.points.count, stride: 32)
+                verbs.append(contentsOf: source.verbs)
+                points.append(contentsOf: source.points)
+            }
+            path = try StrokePath(verbs: verbs, points: points, budget: &geometryBudget)
+        } else {
+            path = try ShapeMergeBoolean.make(sourcePaths, mode: mode, budget: &geometryBudget)
+        }
+        let merged = try PreparedTrimPath(path)
+        try budget.reserve(stride: 192)
+        try budget.reserve(stride: merged.estimatedBytes)
+        // 只有合成及预算全成功才替换旧节点，失败时整个ShapePreparation会丢弃。
+        let index = paths.count
+        paths.append(.trimmed(merged))
+        nodes = [.path(index)]
     }
 
     /// 只收集当前组已出现的路径ID；此前子组和paint也会在第二遍看到更新，未来路径不参与。
@@ -171,7 +283,8 @@ struct ShapeContentPreparation {
                 _ = try matrix.applying(to: point)
             }
             return .path(path, matrix: matrix)
-        case .fill, .stroke, .gradientFill, .gradientStroke, .group, .trimPaths:
+        case .fill, .stroke, .gradientFill, .gradientStroke, .group, .trimPaths, .mergePaths, .repeater,
+             .roundCorners:
             return nil
         }
     }

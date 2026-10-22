@@ -59,7 +59,7 @@ struct FramePlannerTests {
         #expect(images(restored).first?.clip == nil)
     }
 
-    /// 两个引用同一子合成的实例保持各自分组和时刻；逆编码顺序绘制且 alpha 不逐子层预乘。
+    /// 两个子合成实例保留时刻及原图元；候选定义clip在Picture内，外层alpha独立消费。
     @Test func repeatedPrecompositionKeepsGroupBoundaries() async throws {
         let size = try PAGSize(width: 10, height: 20)
         let child = try SceneFixtures.composition(1, layers: [
@@ -80,15 +80,24 @@ struct FramePlannerTests {
         #expect(solids[2].matrix.tx == 5 && solids[2].matrix.ty == 7)
         let groups = groups(prepared)
         #expect(groups.map(\.frame) == [5, 5, 3])
-        #expect(groups[2].opacity == Double(128) / 255)
+        #expect(groups[2].opacity == 1)
+        #expect(groups.allSatisfy { $0.application == .perDraw })
         #expect(groups[2].clip.matrix == solids[2].matrix)
+        let alphaGroups = prepared.plan.commands.compactMap { command -> FrameOpacityGroup? in
+            if case .beginOpacityGroup(let group) = command { group } else { nil }
+        }
+        #expect(alphaGroups.map(\.opacity) == [Double(128) / 255])
+        #expect(alphaGroups.allSatisfy { $0.application == .perDraw })
         var depth = 0
+        var vectorDepth = 0
         for command in prepared.plan.commands {
             if case .beginGroup = command { depth += 1 }
             if case .endGroup = command { depth -= 1 }
-            #expect(depth >= 0)
+            if case .beginVectorPicture = command { vectorDepth += 1 }
+            if case .endVectorPicture = command { vectorDepth -= 1 }
+            #expect(depth >= 0 && vectorDepth >= 0)
         }
-        #expect(depth == 0 && prepared.plan.commands.count == 10)
+        #expect(depth == 0 && vectorDepth == 0)
     }
 
     /// 根显示缩放只应用一次，旋转预合成的裁剪保持局部矩形与真实旋转矩阵。

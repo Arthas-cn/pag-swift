@@ -90,16 +90,17 @@ struct TextPreparationTests {
         #expect(arabic.glyphs.allSatisfy { !$0.fill.elements.isEmpty })
     }
 
-    /// 待实现的颜色字体与背景明确失败；空文本没有背景路径，允许清空可编辑内容。
-    @Test func pendingResourcesFailAndEmptyTextClearsContent() async throws {
+    /// 颜色字体仍明确失败；背景保留每个布局字形指标，空文本可清空可编辑内容。
+    @Test func unsupportedColorGlyphAndBackgroundMetricsForEmptyText() async throws {
         await #expect(throws: PAGError.unsupportedFeature("textColorGlyphs")) {
             try await TextFixtures.prepare(TextFixtures.source("😀"))
         }
-        await #expect(throws: PAGError.unsupportedFeature("textBackground")) {
-            try await TextFixtures.prepare(TextFixtures.source(backgroundAlpha: 128))
-        }
+        let background = try await TextFixtures.prepare(TextFixtures.source(backgroundAlpha: 128))
+        #expect(!background.layout.glyphs.isEmpty)
+        #expect(background.backgroundGlyphs.count == background.layout.glyphs.count)
         let empty = try await TextFixtures.prepare(TextFixtures.source("", backgroundAlpha: 128))
-        #expect(empty.glyphs.isEmpty && empty.passes.isEmpty && empty.layout.bounds == nil)
+        #expect(empty.glyphs.isEmpty && empty.passes.isEmpty && empty.layout.bounds == nil
+                && empty.backgroundGlyphs.isEmpty)
     }
 
     /// 输入与路径预算先于数组增长校验，已取消后台准备不发布系统调用的迟到结果。

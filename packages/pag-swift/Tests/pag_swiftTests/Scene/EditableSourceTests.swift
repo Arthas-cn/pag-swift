@@ -49,11 +49,10 @@ struct EditableSourceTests {
         #expect(file.editableImageIndices == [0, 1])
     }
 
-    /// 有文本不代表完整语义已支持；文本路径样例不能返回残缺可编辑文档。
-    @Test(arguments: [("TextPathCommon.pag", "layerTag:14")])
-    func unsupportedDependenciesFail(_ name: String, _ reason: String) async throws {
-        await #expect(throws: PAGError.unsupportedFeature(reason)) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: name))
-        }
+    /// 路径文字的完整源场景可载入，公开文本槽仍须保留原文档内容。
+    @Test func textPathKeepsEditableText() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "TextPathCommon.pag"))
+        #expect(file.editableTextCount > 0)
+        #expect(!(try file.composition.text(at: 0).text).isEmpty)
     }
 }

@@ -73,4 +73,14 @@ final class PlaybackSubmissionGate: Sendable {
             return try body()
         }
     }
+
+    /// GPU完成后与同步撤销互斥地执行极短缓存发布；不消费播放器后续状态完成许可。
+    func withCompletionPermission<Result>(for token: PlaybackRequestToken,
+                                          _ body: () -> Result) -> Result? {
+        permitted.withLock { current in
+            guard current == token else { return nil }
+            // 锁内只允许小值状态或已完成纹理LRU操作，不得等待GPU、取drawable或await。
+            return body()
+        }
+    }
 }

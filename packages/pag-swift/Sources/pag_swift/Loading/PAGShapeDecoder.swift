@@ -29,9 +29,22 @@ extension PAGSceneDecoder {
         case 23:
             // Gradient.cpp::GradientStrokeTag独立字段次序已经验证，几何与普通Stroke共用已验收的样式核心。
             return try .gradientStroke(readGradientStroke(reader: &reader))
+        case 24:
+            // MergePathsTag只有固定一个Value字节，无flags；未知值不可按默认Add吞掉。
+            guard let mode = SourceMergePathsMode(rawValue: try reader.readUInt8()) else {
+                throw PAGError.unsupportedFeature("mergePathsMode")
+            }
+            return .mergePaths(mode)
         case 25:
             // TrimPaths.cpp字段、两阶段路径作用域与直接drawable已闭包，未知模式仍明确拒绝。
             return try .trimPaths(readTrimPaths(reader: &reader))
+        case 26:
+            // RepeaterTag九项属性独立取证；源组克隆仍由形状准备按帧完成。
+            return try .repeater(readRepeaterProperties(reader: &reader))
+        case 27:
+            // RoundCornersTag仅一个默认10的SimpleProperty<Float>；实际路径修改留给准备层。
+            let flags = try PropertyFlags.read([.property], from: &reader)
+            return try .roundCorners(readScalarProperty(flags[0], defaultValue: 10, reader: &reader))
         default:
             throw PAGError.unsupportedFeature("shapeTag:\(code)")
         }

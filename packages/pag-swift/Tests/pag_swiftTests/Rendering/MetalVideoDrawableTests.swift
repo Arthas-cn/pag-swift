@@ -113,7 +113,7 @@ struct MetalVideoDrawableTests {
             let grouped = try await PreparedScene.prepare(VideoPlanningFixtures.nested(starts: [0, -10], opacity: 128).composition)
             let time = PAGTime(microseconds: 1_000_000)
             guard case .submitted = try await owner.submit(request(grouped, time: time, epoch: epoch)) else {
-                Issue.record("双视频整体透明组未提交")
+                Issue.record("双视频无快照透明组未提交")
                 await box.shutdown()
                 window.close()
                 return
@@ -131,9 +131,10 @@ struct MetalVideoDrawableTests {
                 window.close()
                 return
             }
+            // 无快照的双视频预合成逐draw继承alpha，撤销前后均只有两次最终绘制。
             #expect(counts.withLock {
                 $0.count == 87 && $0.allSatisfy { $0 > 0 } &&
-                    $0.prefix(12).allSatisfy { $0 == 1 } && $0.suffix(3).allSatisfy { $0 == 3 }
+                    $0.prefix(12).allSatisfy { $0 == 1 } && $0.suffix(3).allSatisfy { $0 == 2 }
             })
             #expect(!box.mailbox.snapshot.hasLease)
         } catch {

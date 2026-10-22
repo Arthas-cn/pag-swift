@@ -1,22 +1,33 @@
+import Metal
+
 /// 渐变在GPU准备阶段的最终分支；退化使用已有纯色管线，仍保留完整预乘RGBA。
 enum MetalGradientInput {
     /// 已乘自身alpha，尚未乘paint/组透明度的单色。
     case solid(SIMD4<Float>)
     /// 固定大小的解析常量，不保活或上传源stop数组。
     case analytic(MetalGradientUniforms)
+    /// 小输入LUT取代超过八段的解析常量；片元仍写当前显示附件。
+    case texture(MetalGradientUniforms, any MTLTexture)
 
     /// 在真实几何和裁剪非空后准备材料；预算、取消、精度和不支持错误不返回半份输入。
     static func make(_ gradient: PreparedGradient, origin: ScenePoint,
-                     budget: inout MetalFrameBudget) throws -> MetalGradientInput {
+                     budget: inout MetalFrameBudget,
+                     resources: MetalResources? = nil) throws -> MetalGradientInput {
         try budget.reserve(512)
         switch try GradientTransform.layout(for: gradient, origin: origin) {
         case .solid(let color):
             return .solid(SIMD4(color.x * color.w, color.y * color.w, color.z * color.w, color.w))
         case .mapped(let matrix):
-            guard case .analytic(let program) = gradient.colorizer.result else {
+            switch gradient.colorizer.result {
+            case .analytic(let program):
+                return .analytic(try MetalGradientUniforms(matrix: matrix, gradient: gradient, program: program))
+            case .requiresTexture:
+                guard let resources else { throw PAGError.unsupportedFeature("gradientTextureColorizer") }
+                let texture = try resources.gradient(gradient.colorizer, budget: &budget)
+                return .texture(MetalGradientUniforms(matrix: matrix, gradient: gradient), texture)
+            case .singleColor, .invalidPrecision:
                 throw PAGError.renderingFailure("gradientPrecision")
             }
-            return .analytic(try MetalGradientUniforms(matrix: matrix, gradient: gradient, program: program))
         }
     }
 }
@@ -67,6 +78,16 @@ struct MetalGradientUniforms {
             intervals = (Self.pack(values, at: 0), Self.pack(values, at: 1), Self.pack(values, at: 2), Self.pack(values, at: 3),
                          Self.pack(values, at: 4), Self.pack(values, at: 5), Self.pack(values, at: 6), Self.pack(values, at: 7))
         }
+    }
+
+    /// 纹理程序只需布局和原始边色；未用解析槽位全部清零。
+    init(matrix: GradientTransform, gradient: PreparedGradient) {
+        horizontal = SIMD4(matrix.a, matrix.c, matrix.tx, 0)
+        vertical = SIMD4(matrix.b, matrix.d, matrix.ty, 0)
+        first = gradient.colorizer.first
+        last = gradient.colorizer.last
+        header = SIMD4(UInt32(gradient.kind.rawValue), 2, 0, 0)
+        intervals = (.zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero)
     }
 
     /// 复制一个有界区间，缺省槽位清零；只由已检查段数的初始化器调用。

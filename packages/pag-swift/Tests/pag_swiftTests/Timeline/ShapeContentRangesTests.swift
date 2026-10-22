@@ -12,6 +12,20 @@ struct ShapeContentRangesTests {
         #expect(try ShapeRangeFixtures.ranges([constant]).ranges == [0...99])
     }
 
+    /// 无Custom dash的两种描边仍完整静态，且恰好少访问offset与八条interval。
+    @Test(arguments: ["stroke", "gradientStroke"])
+    func absentDashesSkipOnlyDashProperties(family: String) throws {
+        let without = try ShapeRangeFixtures.element(family, selected: -1, includesDashes: false)
+        let with = try ShapeRangeFixtures.element(family, selected: -1)
+        let layerWithout = SceneFixtures.layer(1, duration: 100, content: .shape([without]))
+        let layerWith = SceneFixtures.layer(1, duration: 100, content: .shape([with]))
+        var withoutBudget = FramePlanBudget(limit: 8 * 1024 * 1024)
+        var withBudget = FramePlanBudget(limit: 8 * 1024 * 1024)
+        #expect(try ShapeContentRanges.make(for: layerWithout, budget: &withoutBudget).ranges == [0...99])
+        #expect(try ShapeContentRanges.make(for: layerWith, budget: &withBudget).ranges == [0...99])
+        #expect(withBudget.used - withoutBudget.used == 9 * 32)
+    }
+
     /// 外层变换、timeRemap、父引用和active不属于Shape内容变化；内部opacity轨道则属于内容。
     @Test func outerLayerPropertiesDoNotContaminateContentRanges() throws {
         let opacity: SourceProperty<UInt8> = try ShapeRangeFixtures.property(0, index: 0, selected: 0)

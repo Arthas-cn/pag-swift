@@ -1,6 +1,7 @@
 #if os(macOS)
 import Darwin
 import Foundation
+import Metal
 import Testing
 @testable import pag_swift
 
@@ -21,26 +22,28 @@ struct GradientBenchmarkTests {
         }
     }
 
-    /// 超解析容量且不退化时固定输入明确拒绝；同一source的退化帧仍成功，不能把缓存状态误当布局结果。
-    @Test func recordsAnalyticCapacityRejection() throws {
+    /// 超解析容量时测小LUT输入成本；同一source的退化帧仍走边色。
+    @Test func recordsTextureCapacityCost() throws {
         let values = colors(count: 20)
         var sourceBudget = FramePlanBudget(limit: 64 * 1024 * 1024)
         let gradient = try GradientEvaluation.prepare(GradientShapeFixtures.gradient(colors: .init(constant: values)),
             at: 0, matrix: .identity, reusing: [], budget: &sourceBudget)
         var budget = try MetalFrameBudget()
-        var rejection: PAGError?
+        let resources = try MetalResources(device: try #require(MTLCreateSystemDefaultDevice()))
         let start = ContinuousClock.now
-        // 测试宏的诊断和错误匹配不计入生产拒绝路径的CPU时间。
-        do { _ = try MetalGradientInput.make(gradient, origin: .zero, budget: &budget) }
-        catch let error as PAGError { rejection = error }
+        let input = try MetalGradientInput.make(gradient, origin: .zero,
+            budget: &budget, resources: resources)
         let elapsed = milliseconds(since: start)
-        #expect(rejection == .unsupportedFeature("gradientTextureColorizer"))
+        guard case .texture(_, let texture) = input else {
+            Issue.record("超解析容量应生成256×1输入纹理"); return
+        }
+        #expect(texture.width == 256 && texture.height == 1)
         let degenerate = PreparedGradient(kind: gradient.kind, start: gradient.start, end: gradient.start,
             matrix: gradient.matrix, colorizer: gradient.colorizer, estimatedBytes: gradient.estimatedBytes)
         guard case .solid = try MetalGradientInput.make(degenerate, origin: .zero, budget: &budget) else {
-            Issue.record("容量拒绝不能抢在几何退化之前"); return
+            Issue.record("纹理状态不能抢在几何退化之前"); return
         }
-        print("PAG gradient benchmark stops_20 rejected=gradientTextureColorizer input_cpu_ms=\(elapsed) retained_program_bytes=\(gradient.colorizer.estimatedBytes) peak_process_rss_bytes=\(try peakRSS())")
+        print("PAG gradient benchmark stops_20 texture_width=256 input_cpu_ms=\(elapsed) retained_program_bytes=\(gradient.colorizer.estimatedBytes) peak_process_rss_bytes=\(try peakRSS())")
     }
 
     /// worker启动信号后5ms请求取消；记录实际完成结果并等待worker，不伪称固定阶段被中断。
@@ -114,6 +117,8 @@ struct GradientBenchmarkTests {
             case .analytic(let value):
                 #expect(mode != .degenerateEndpoint)
                 if original.source.colorStops.count == 9 { #expect(value.header.z == 8) }
+            case .texture:
+                Issue.record("九色基准必须使用解析八段程序")
             }
         }
         print("PAG gradient benchmark \(name) cold_prepare_ms=\(coldPrepare) cold_mesh_ms=\(coldMesh) prepare_ms=\(summary(prepares)) warm_mesh_ms=\(summary(meshes)) input_cpu_ms=\(summary(inputs)) logical_shape_cache=\(await store.retainedBytes) logical_mesh_cache=\(cache.byteCount) peak_process_rss_bytes=\(try peakRSS())")

@@ -24,16 +24,20 @@ final class PreparedGradientColorizer: Sendable {
     let last: SIMD4<Float>
     /// 解析程序或延后到非退化绘制时处理的不可用状态。
     let result: GradientColorizerResult
+    /// 纹理分支剥去端点hardstop后的规范化色标；nil表示解析或无效材料。
+    let textureStops: [GradientStop]?
     /// 包括source双表与系数的保守持有成本；缓存命中仍需预付。
     let estimatedBytes: Int
 
     /// 保存完整编译结果；调用方必须已经计费并校验双表，失败不能发布半程序。
     init(source: SourceGradientColors, first: SIMD4<Float>, last: SIMD4<Float>,
-         result: GradientColorizerResult, estimatedBytes: Int) {
+         result: GradientColorizerResult, estimatedBytes: Int,
+         textureStops: [GradientStop]? = nil) {
         self.source = source
         self.first = first
         self.last = last
         self.result = result
+        self.textureStops = textureStops
         self.estimatedBytes = estimatedBytes
     }
 }
@@ -44,9 +48,9 @@ enum GradientColorizerResult: Sendable {
     case singleColor
     /// 已编译的有限Float解析参数，不需要纹理查表。
     case analytic(GradientColorizerProgram)
-    /// 上游需纹理LUT；首版保留边色，非退化绘制明确未支持。
+    /// 上游需256×1输入LUT；缺少已校验色标时仍明确失败。
     case requiresTexture
-    /// 系数非有限、无有效区间或源shader末端未定义，不能提交给GPU。
+    /// 系数非有限或没有任何有效区间，不能提交给GPU。
     case invalidPrecision
 }
 

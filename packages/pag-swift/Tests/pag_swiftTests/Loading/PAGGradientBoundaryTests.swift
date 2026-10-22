@@ -117,11 +117,9 @@ struct PAGGradientBoundaryTests {
         #expect(reader.position == 0 && decoder.budget.used == 0)
     }
 
-    /// 渐变及顶层Stroke已完整读取，真实文件仍须拒绝更后面的未支持内容，不能返回残缺文件。
-    @Test(arguments: [("TextAnimatorSmooth.pag", "layerTag:70"), ("list/1.pag", "layerTag:14")])
-    func completeFilesPreserveLaterUnsupportedContent(_ name: String, _ reason: String) async throws {
-        await #expect(throws: PAGError.unsupportedFeature(reason)) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: name))
-        }
+    /// 真实list/1的渐变与邻层轨道遮罩可在同一份完整文件中保留。
+    @Test func gradientFileKeepsTrackMatte() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "list/1.pag"))
+        #expect(file.storage.compositions.contains { $0.layers.contains { $0.trackMatte != .none } })
     }
 }

@@ -6,7 +6,7 @@ enum SourceLayerContent: Sendable {
     case solid(size: PAGSize, color: SceneColor)
     /// 按文件顺序排列的静态形状操作。
     case shape([SourceShape])
-    /// 完整静态文字与原始排版参数；编辑时只覆盖可编辑样式。
+    /// 文字样式与原始排版参数；可选动画器另存于SourceLayer。
     case text(SourceText)
     /// 文件级图片资源 ID，验证阶段确保存在。
     case image(UInt32)
@@ -26,6 +26,20 @@ enum SourceLayerContent: Sendable {
     }
 }
 
+/// 轨道遮罩的文件值；源拓扑保留原值，实际引用由邻层计划和局部Metal效果消费。
+enum SourceTrackMatteType: UInt8, Sendable {
+    /// 文件缺省值；这一层不请求前一编码层作为遮罩。
+    case none = 0
+    /// 使用相邻前一层的透明度遮住当前层。
+    case alpha = 1
+    /// 使用相邻前一层透明度的反值保留当前层。
+    case alphaInverted = 2
+    /// 使用相邻前一层的亮度作为当前层遮罩。
+    case luma = 3
+    /// 使用相邻前一层亮度的反值保留当前层。
+    case lumaInverted = 4
+}
+
 /// 一份合成内部的不可变图层记录；时间均保留为父合成帧，不是微秒。
 struct SourceLayer: Sendable {
     /// 当前合成内唯一的编码 ID，不直接作为公开实例身份。
@@ -40,10 +54,32 @@ struct SourceLayer: Sendable {
     let durationFrames: Int64
     /// 文件中的显示开关，不替代时间区间判定。
     let isActive: Bool
+    /// 原始遮罩模式；首个编码层即使非None也保留文件值，引用由合成拓扑决定。
+    let trackMatte: SourceTrackMatteType
+    /// 图层完整内容与此前背景的混合模式；不由子图元分别消费。
+    let blendMode: SourceLayerBlendMode
+    /// tag57真实绿通道直通子范围；只允许在Screen预合成完整内容后消费。
+    let levelsGreenOnly: Bool
+    /// tag63相邻帧运动模糊位；真正跳过与否由计划时的前后矩阵决定。
+    let motionBlur: Bool
     /// 完整二维变换轨道，常量或关键帧均保留，不允许缺失。
     let transform: SourceTransformProperties
     /// 图层内容或跨合成引用。
     let content: SourceLayerContent
+    /// 按LayerTag编码顺序保留的图层蒙版；空数组表示不安装蒙版裁剪。
+    let masks: [SourceMask]
+    /// tag69文字沿路径的源轨道；nil表示普通文字层，不从同名mask推断。
+    let textPath: SourceTextPathOption?
+    /// 按tag70编码顺序保留的文字动画器；空数组表示无逐字形效果。
+    let textAnimators: [SourceTextAnimator]
+    /// 按tag29/65编码顺序保留的静态下方投影；空数组表示无图层样式。
+    let dropShadows: [SourceDropShadow]
+    /// 图像层的tag56平铺轨道；nil表示按普通图像直接采样。
+    let motionTile: SourceMotionTile?
+    /// 图像层的tag59凸出轨道；nil表示输入纹理没有空间扭曲。
+    let bulge: SourceBulge?
+    /// 图像层tag58的四角透视轨道；nil表示无四边形输出变形。
+    let cornerPin: SourceCornerPin?
     /// 文件内图层标记，保留原始帧与备注；不参与画面求值，没有标记时为空。
     let markers: [SourceMarker]
     /// 文件中的层时间字段；不把它与ImageFillRule的素材采样轨道混用。
@@ -51,9 +87,16 @@ struct SourceLayer: Sendable {
     /// 图片层的素材适配规则；nil表示未编码，不能用缺省规则覆盖文件缩放表。
     let imageFillRule: SourceImageFillRule?
 
-    /// 组合已读取的属性、内容和可选素材规则；时间字段与标记保持源元数据身份，不生成额外图层。
+    /// 组合已读取的属性、遮罩模式、内容与可选素材规则；不在单层上猜测相邻引用。
     init(id: UInt32, name: String, parentID: UInt32?, startFrame: Int64, durationFrames: Int64,
-         isActive: Bool, transform: SourceTransformProperties, content: SourceLayerContent,
+         isActive: Bool, trackMatte: SourceTrackMatteType = .none,
+         blendMode: SourceLayerBlendMode = .normal, levelsGreenOnly: Bool = false,
+         motionBlur: Bool = false,
+         transform: SourceTransformProperties, content: SourceLayerContent,
+         masks: [SourceMask] = [], textPath: SourceTextPathOption? = nil,
+         textAnimators: [SourceTextAnimator] = [], dropShadows: [SourceDropShadow] = [],
+         motionTile: SourceMotionTile? = nil, bulge: SourceBulge? = nil,
+         cornerPin: SourceCornerPin? = nil,
          markers: [SourceMarker] = [], timing: SourceLayerTiming = .identity,
          imageFillRule: SourceImageFillRule? = nil) {
         self.id = id
@@ -62,8 +105,19 @@ struct SourceLayer: Sendable {
         self.startFrame = startFrame
         self.durationFrames = durationFrames
         self.isActive = isActive
+        self.trackMatte = trackMatte
+        self.blendMode = blendMode
+        self.levelsGreenOnly = levelsGreenOnly
+        self.motionBlur = motionBlur
         self.transform = transform
         self.content = content
+        self.masks = masks
+        self.textPath = textPath
+        self.textAnimators = textAnimators
+        self.dropShadows = dropShadows
+        self.motionTile = motionTile
+        self.bulge = bulge
+        self.cornerPin = cornerPin
         self.markers = markers
         self.timing = timing
         self.imageFillRule = imageFillRule

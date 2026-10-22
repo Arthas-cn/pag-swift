@@ -12,6 +12,10 @@ struct PreparedScene: Sendable {
     let estimatedShapeBytes: Int
     /// 每个图片实例的根素材时间轴；同文档编辑共享，不在逐帧构建祖先链或裁剪曲线。
     let imageTimes: PreparedImageTimes
+    /// 源定义及原始层的Picture请求资格；仅为后续决策提供纯值，不表示已命中GPU快照。
+    let pictureCandidates: PictureCandidates
+    /// 定义级静态分析和候选构建的保守费用；同源编辑复用仍向新预算收费。
+    let estimatedPictureAnalysisBytes: Int
     /// 当前播放准备结果独占的有界 bitmap 基底；同播放器编辑复用，纯矢量场景为 nil。
     let bitmaps: BitmapFrameStore?
     /// 当前播放器的内嵌视频会话与有界输入缓存；其他播放器不可复用该可变owner。
@@ -52,7 +56,8 @@ struct PreparedScene: Sendable {
                         try budget.reserve(stride: old.estimatedBytes)
                         texts[reference] = old
                     } else {
-                        texts[reference] = try TextPreparation.prepare(text, style: style, budget: &budget)
+                        texts[reference] = try TextPreparation.prepare(text, reference: reference,
+                                                                         style: style, budget: &budget)
                     }
                 default: break
                 }
@@ -66,12 +71,32 @@ struct PreparedScene: Sendable {
         } else {
             imageTimes = try PreparedImageTimes.prepare(composition.storage, budget: &budget)
         }
+        let pictureCandidates: PictureCandidates
+        let pictureCost: Int
+        if let reusable {
+            // 候选只依赖不变的源定义；文本编辑改变像素身份，但不会改变Auto请求资格。
+            try budget.reserve(stride: reusable.estimatedPictureAnalysisBytes)
+            pictureCandidates = reusable.pictureCandidates
+            pictureCost = reusable.estimatedPictureAnalysisBytes
+        } else {
+            let startCost = budget.used
+            let storage = composition.storage
+            let ranges = try VectorStaticRanges.make(compositions: storage.compositions,
+                                                      indices: storage.compositionIndices, budget: &budget)
+            pictureCandidates = try PictureCandidates.make(compositions: storage.compositions,
+                                                            indices: storage.compositionIndices,
+                                                            vectorRanges: ranges, budget: &budget)
+            pictureCost = budget.used - startCost
+        }
         let hasBitmaps = composition.storage.compositions.contains { $0.bitmap != nil }
         let hasVideos = composition.storage.compositions.contains { $0.video != nil }
         let dynamicShapes = try reusable?.dynamicShapes ?? (dynamicTemplates.isEmpty ? nil : PreparedShapeStore(templates: dynamicTemplates))
+        // 最后一次分析或同源复用收费后仍可能被撤销；完整场景只有在最终取消检查后才发布。
+        try Task.checkCancellation()
         return PreparedScene(composition: composition, shapes: shapes, dynamicShapes: dynamicShapes,
                              texts: texts, estimatedShapeBytes: shapeCost,
-                             imageTimes: imageTimes,
+                             imageTimes: imageTimes, pictureCandidates: pictureCandidates,
+                             estimatedPictureAnalysisBytes: pictureCost,
                              bitmaps: hasBitmaps ? reusable?.bitmaps ?? BitmapFrameStore() : nil,
                              videos: hasVideos ? reusable?.videos ?? VideoFrameStore() : nil)
     }

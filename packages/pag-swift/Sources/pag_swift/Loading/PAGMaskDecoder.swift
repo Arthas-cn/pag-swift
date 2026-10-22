@@ -1,4 +1,4 @@
-/// MaskTag.cpp字段的内部读取；正式层分发仍关闭，不能忽略蒙版画面后发布文档。
+/// MaskTag.cpp字段的完整读取；正式层保留14/84源列表，未实现的画面模式在求值时失败。
 extension PAGSceneDecoder {
     /// 完整读取14/84的源轨道；未知版本/模式、损坏、非有限、预算和取消均直接失败。
     mutating func readMask(code: UInt16, reader: inout PAGByteReader) throws -> SourceMask {

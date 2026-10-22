@@ -71,10 +71,10 @@ struct PAGVideoTests {
         #expect(file.composition.duration.microseconds > 0)
     }
 
-    /// 视频解码可用不能掩盖alpha.pag的track matte依赖，完整场景仍明确拒绝未支持语义。
-    @Test func completeFileStillRejectsUnsupportedMatte() async throws {
-        await #expect(throws: PAGError.unsupportedFeature("trackMatte")) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: "alpha.pag"))
-        }
+    /// 视频层与轨道遮罩共存的真实alpha文件应完整载入，不能只保留视频子树。
+    @Test func completeFileKeepsVideoAndTrackMatte() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "alpha.pag"))
+        #expect(file.storage.compositions.contains { $0.video != nil })
+        #expect(file.storage.compositions.contains { $0.layers.contains { $0.trackMatte != .none } })
     }
 }

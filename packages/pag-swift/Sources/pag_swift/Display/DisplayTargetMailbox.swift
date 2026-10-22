@@ -98,6 +98,16 @@ final class DisplayTargetMailbox: Sendable {
         }
     }
 
+    /// GPU租约已归还后，在显示代数锁内校验并发布小份已完成缓存；调用锁序必须为播放gate再到此信箱。
+    func withCompletedEpochPermission<Result>(for epoch: UUID, _ body: () -> Result) -> Result? {
+        storage.withLock { state in
+            guard state.epoch == epoch, !state.isBlocked, !state.isClosed,
+                  state.configuration.isMounted, state.configuration.isActive else { return nil }
+            // 回调不能取drawable、等待GPU或反向请求播放gate；只允许当前owner的缓存状态更新。
+            return body()
+        }
+    }
+
     /// 精确归还自身租约，重复/外来释放无效；所有 continuation 都在锁外恢复。
     @discardableResult func release(_ lease: DisplayTargetLease) -> Bool {
         let result = storage.withLock { state -> (Bool, [CheckedContinuation<Bool, Never>], [CheckedContinuation<Void, Never>]) in
