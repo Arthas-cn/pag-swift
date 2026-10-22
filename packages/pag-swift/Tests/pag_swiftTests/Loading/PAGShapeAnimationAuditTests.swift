@@ -58,9 +58,10 @@ struct ShapeAnimationInspection {
     private(set) var roundCornersReaders: [PAGByteReader] = []
     /// tag29/65的有界DropShadow样式子流及版本，不把字段读取视为滤镜已支持。
     private(set) var dropShadowReaders: [(code: UInt16, reader: PAGByteReader)] = []
-    /// tag56/57/58/59/61/85的效果原始子流；只用于真实门禁字段取证。
+    /// tag56...61/85的效果原始子流；只用于真实门禁字段取证。
     private(set) var effectReaders: [(code: UInt16, compositionID: UInt32,
                                       layerID: UInt32, kind: UInt8, reader: PAGByteReader,
+                                      layerReader: PAGByteReader,
                                       transform: PAGByteReader?,
                                       attributes: (code: UInt16, reader: PAGByteReader)?)] = []
     /// 含MergePaths的每层组直接子标签顺序；只记录边界，不推断嵌套子组的画面。
@@ -90,6 +91,7 @@ struct ShapeAnimationInspection {
             while let (code, _, payload) = try block(from: &composition) {
                 guard code == 5 else { continue }
                 var layer = payload
+                let fullLayer = payload
                 let kind = try layer.readUInt8()
                 let layerID = try layer.readEncodedUInt32()
                 var textPathMaskReaders: [(code: UInt16, reader: PAGByteReader)] = []
@@ -124,13 +126,13 @@ struct ShapeAnimationInspection {
                     if code == 13 { layerTransform = payload }
                     if code == 6 || code == 52 || code == 62 { layerAttributes = (code, payload) }
                     if code == 29 || code == 65 { dropShadowReaders.append((code, payload)) }
-                    if code == 56 || code == 57 || code == 58 || code == 59 || code == 61 || code == 85 {
+                    if (56...61).contains(code) || code == 85 {
                         effectPayloads.append((code, payload))
                     }
                 }
                 for item in effectPayloads {
                     effectReaders.append((item.code, compositionID, layerID, kind,
-                                          item.reader, layerTransform, layerAttributes))
+                                          item.reader, fullLayer, layerTransform, layerAttributes))
                 }
                 if let layerExtra {
                     layerExtraReaders.append((compositionID, layerID, kind, layerExtra, layerTransform,

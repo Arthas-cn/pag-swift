@@ -48,8 +48,18 @@ struct MetalFrameBuilder {
     var trackMatteWorks: [MetalTrackMatteWork] = []
     /// 静态投影的局部内容批次；根pass只读取其alpha绘制下方颜色。
     var dropShadowWorks: [MetalDropShadowWork] = []
+    /// GradientOverlay整层Shape内容与样式结果，根pass只读取有界结果纹理。
+    var gradientOverlayWorks: [MetalGradientOverlayWork] = []
+    /// Shape局部FastBlur工作；根pass仅以HardLight读取其最终纹理。
+    var shapeBlurBlendWorks: [MetalShapeBlurBlendWork] = []
     /// Text Bulge的字形/背景有界局部批次；根pass仍直接画drawable。
     var textBulgeWorks: [MetalTextBulgeWork] = []
+    /// 内容pass序号对应的两轴Glow工作，编码时必须插在该pass之后。
+    var glowWorks: [Int: MetalGlowWork] = [:]
+    /// 同一内容pass的Glow Merge和后续FastBlur，必须紧跟Glow两轴编码。
+    var fastBlurWorks: [Int: MetalGlowFastBlurWork] = [:]
+    /// 内容pass之后立即编码的局部MotionTile与Glow三段效果。
+    var mappedTileGlowWorks: [Int: MetalMappedTileGlowWork] = [:]
     /// 首帧尚未GPU完成时同一键的唯一活动纹理。
     var pendingPictures: [MetalPictureKey: MetalPictureTexture] = [:]
     /// 所有实际回退原因，测试和内部渲染诊断可读取。
@@ -151,10 +161,16 @@ struct MetalFrameBuilder {
         }
         var replacement = self
         replacement.budget = trial
+        guard matte.ownerOpacity.isFinite, (0...1).contains(matte.ownerOpacity),
+              matte.ownerBlendMode == .normal || matte.ownerBlendMode == .hardLight else {
+            throw PAGError.unsupportedFeature("trackMatteOwnerBlend")
+        }
         let rectangle = try resources.rectangle(budget: &replacement.budget)
         try replacement.append(mesh: rectangle, texture: prepared.work.contentLoan.texture,
-            matrix: prepared.toDisplay, color: SIMD4(repeating: 1), clips: replacement.clips,
-            featherMaskTexture: prepared.work.sourceLoan.texture, trackMatteMode: matte.mode)
+            matrix: prepared.toDisplay,
+            color: SIMD4(repeating: Float(matte.ownerOpacity)), clips: replacement.clips,
+            featherMaskTexture: prepared.work.sourceLoan.texture, trackMatteMode: matte.mode,
+            hardLightBlend: matte.ownerBlendMode == .hardLight)
         replacement.loans += prepared.loans
         replacement.trackMatteWorks.append(prepared.work)
         self = replacement
@@ -226,7 +242,10 @@ struct MetalFrameBuilder {
                         blendMode: SourceLayerBlendMode = .normal,
                         levelsGreenOnly: Bool = false,
                         motionTile: FrameMotionTile? = nil,
-                        motionBlur: MotionBlurSampling? = nil) throws {
+                        motionBlur: MotionBlurSampling? = nil,
+                        glow: SampledGlow? = nil,
+                        fastBlur: SampledFastBlur? = nil,
+                        tileGlowBulge: SampledBulge? = nil) throws {
         guard opacity.isFinite, (0...1).contains(opacity) else { throw PAGError.renderingFailure("metalGroupOpacity") }
         guard blendMode == .normal || application == .composite else {
             throw PAGError.renderingFailure("metalBlendRequiresComposite")
@@ -234,13 +253,36 @@ struct MetalFrameBuilder {
         guard !levelsGreenOnly || (blendMode == .screen && application == .composite) else {
             throw PAGError.renderingFailure("metalLevelsBlendOrder")
         }
-        guard motionTile == nil || (clip != nil && blendMode == .screen && levelsGreenOnly &&
-            maskScope == nil && deferredClips == nil) else {
+        let mappedTileGlow = motionTile != nil && glow != nil && kind == .composition &&
+            blendMode == .normal && !levelsGreenOnly && motionBlur == nil && fastBlur == nil
+        guard motionTile == nil || (clip != nil && maskScope == nil && deferredClips == nil &&
+            ((blendMode == .screen && levelsGreenOnly) || mappedTileGlow)) else {
             throw PAGError.unsupportedFeature("motionTilePrecompositionScope")
         }
-        guard motionBlur == nil || (motionTile != nil && blendMode == .screen && levelsGreenOnly &&
-            application == .composite && maskScope == nil && motionBlur?.shouldSkip == false) else {
+        let plainMotionBlur = motionBlur?.shouldSkip == false && kind == .composition && clip != nil &&
+            motionTile == nil && glow == nil && fastBlur == nil && blendMode == .normal &&
+            !levelsGreenOnly && application == .composite && maskScope == nil &&
+            parentMaskScope == nil
+        guard motionBlur == nil || plainMotionBlur || (motionTile != nil &&
+            blendMode == .screen && levelsGreenOnly && application == .composite &&
+            maskScope == nil && motionBlur?.shouldSkip == false) else {
             throw PAGError.unsupportedFeature("motionBlurPrecompositionScope")
+        }
+        guard glow == nil || (kind == .composition && clip != nil && blendMode == .normal &&
+            application == .composite && !levelsGreenOnly &&
+            (motionTile == nil || mappedTileGlow) && motionBlur == nil &&
+            maskScope == nil && parentMaskScope == nil) else {
+            throw PAGError.unsupportedFeature("glowPrecompositionScope")
+        }
+        if let fastBlur {
+            guard glow != nil, kind == .composition, application == .composite,
+                  maskScope == nil, parentMaskScope == nil,
+                  fastBlur.blurriness.isFinite, fastBlur.blurriness >= 0 else {
+                throw PAGError.unsupportedFeature("fastBlurPrecompositionScope")
+            }
+        }
+        guard tileGlowBulge == nil || (mappedTileGlow && tileGlowBulge?.pinning == true) else {
+            throw PAGError.unsupportedFeature("tileGlowBulgeScope")
         }
         // 双mask目前只等价于单图像片元交集，额外alpha组须先独立证明后才能接入。
         guard parentMaskScope == nil || (opacity == 1 && blendMode == .normal) else {
@@ -253,20 +295,26 @@ struct MetalFrameBuilder {
                                      previousMaskDeferred: maskDeferred,
                                      compositeClips: compositeClips, opacity: opacity, application: application,
                                      blendMode: blendMode, levelsGreenOnly: levelsGreenOnly,
-                                     motionTile: motionTile, motionBlur: motionBlur,
+                                     motionTile: motionTile, motionBlur: motionBlur, glow: glow,
+                                     tileGlowBulge: tileGlowBulge, fastBlur: fastBlur,
                                      compositionClip: clip,
                                      start: draws.count))
         if opacity == 0 || compositeClips.isEmpty { limit = nil }
         else if let bounds = compositeClips.bounds { limit = limit?.intersection(bounds) }
         // 将祖先裁剪移到组结果，防止未来抗锯齿覆盖在子内容和组结果各乘一次。
-        if (opacity < 1 || blendMode == .screen), application == .composite {
+        if (opacity < 1 || blendMode == .screen || glow != nil || motionBlur != nil),
+           application == .composite {
             deferredClips = try (deferredClips ?? MetalClipValues()).merging(compositeClips)
             // 普通clip属于外层DrawOp；必要颜色组内的子draw不先乘它。
             if maskScope != nil { maskDeferred = true }
         }
-        clips = (opacity < 1 || blendMode == .screen) && application == .composite ? MetalClipValues() : compositeClips
-        if let clip, motionTile != nil, opacity > 0 {
-            // 平铺可把当前视口外的源内容带回视口；输入合成不能先按根drawable裁掉。
+        clips = (opacity < 1 || blendMode == .screen || glow != nil || motionBlur != nil) &&
+            application == .composite ?
+            MetalClipValues() : compositeClips
+        if let clip, opacity > 0,
+           motionTile != nil || motionBlur != nil ||
+               ((fastBlur?.blurriness ?? 0) > 0 && fastBlur?.repeatEdgePixels == false) {
+            // 平铺或透明边缘Blur会把视口外源内容带入画面；输入先保留完整预合成域。
             var sourceClip = MetalClipValues()
             try sourceClip.append(clip)
             limit = sourceClip.bounds
@@ -285,7 +333,8 @@ struct MetalFrameBuilder {
         deferredClips = scope.previousDeferred
         maskDeferred = scope.previousMaskDeferred
         limit = scope.previousLimit
-        guard scope.opacity < 1 || scope.blendMode == .screen else { return }
+        guard scope.opacity < 1 || scope.blendMode == .screen || scope.glow != nil ||
+            scope.fastBlur != nil || scope.motionBlur != nil else { return }
         if scope.application == .perDraw {
             // 内部composite已只留下一个结果draw；原位乘色既不复制数组，也不重复修改其已编码子pass。
             for index in scope.start..<draws.count {
@@ -298,7 +347,8 @@ struct MetalFrameBuilder {
         let children = Array(draws[scope.start...])
         draws.removeSubrange(scope.start...)
         guard scope.opacity > 0, let groupLimit, let first = children.first else { return }
-        if children.count == 1 && scope.blendMode == .normal {
+        if children.count == 1 && scope.blendMode == .normal && scope.glow == nil &&
+           scope.motionBlur == nil {
             // 一次SrcOver可直接折入组alpha；嵌套组也已经化为一个组结果图元。
             let combined = try first.clips.merging(scope.compositeClips)
             try append(mesh: first.mesh, texture: first.texture, matrix: first.matrix,
@@ -319,10 +369,68 @@ struct MetalFrameBuilder {
             bound = try RenderBounds(left: bound.left - 1, top: bound.top - 1,
                 right: bound.right + 1, bottom: bound.bottom + 1)
         }
-        guard let rect = try bound.pixelRect(clippedTo: groupLimit) else { return }
+        let mappedBlur: MappedMotionBlurLayout?
+        let rect: RenderPixelRect
+        if let blur = scope.motionBlur, scope.motionTile == nil,
+           let clip = scope.compositionClip {
+            guard let layout = try MappedMotionBlurLayout(displayBounds: bound,
+                sourceLimit: groupLimit, clip: clip, sampling: blur) else { return }
+            mappedBlur = layout
+            rect = layout.contentRect
+        } else {
+            mappedBlur = nil
+            guard let ordinary = try bound.pixelRect(clippedTo: groupLimit) else { return }
+            rect = ordinary
+        }
         let loan = try resources.groups.acquire(width: rect.width, height: rect.height, budget: &budget)
         loans.append(loan)
         try addPass(children, rect: rect, attachment: loan)
+        let contentPassIndex = passes.count - 1
+        if let mappedBlur {
+            try attachPlainMotionBlur(mappedBlur, content: loan, scope: scope)
+            return
+        }
+        if let tile = scope.motionTile, let glow = scope.glow,
+           let clip = scope.compositionClip {
+            guard let prepared = try attachTileGlowBulge(tile: tile, glow: glow,
+                bulge: scope.tileGlowBulge, clip: clip, content: loan,
+                contentRect: rect, contentPassIndex: contentPassIndex) else { return }
+            let mesh = try resources.rectangle(budget: &budget)
+            // 前一效果已向原合成边界之外平铺；最终只保留祖先裁剪，避免裁掉扩出的像素。
+            try append(mesh: mesh, texture: prepared.texture, matrix: prepared.matrix,
+                color: SIMD4(repeating: Float(scope.opacity)), clips: scope.previous,
+                tileGlowBulge: prepared.input)
+            return
+        }
+        var glowInput: MetalGlowInput?
+        if let glow = scope.glow {
+            // 两轴尺寸按已roundOut的完整内容输入计算；三张附件依次借用且统一由根批次保活。
+            let sampling = try GlowSampling(glow, inputWidth: rect.width, inputHeight: rect.height)
+            let horizontal = try resources.groups.acquire(width: Int(sampling.blurWidth),
+                height: Int(sampling.blurHeight), budget: &budget)
+            loans.append(horizontal)
+            let vertical = try resources.groups.acquire(width: Int(sampling.blurWidth),
+                height: Int(sampling.blurHeight), budget: &budget)
+            loans.append(vertical)
+            glowWorks[contentPassIndex] = MetalGlowWork(source: loan, horizontal: horizontal,
+                vertical: vertical, sampling: sampling)
+            glowInput = MetalGlowInput(texture: vertical.texture, threshold: sampling.threshold)
+        } else {
+            glowInput = nil
+        }
+        var resultTexture: any MTLTexture = loan.texture
+        var resultRect = rect
+        if let blur = scope.fastBlur, blur.blurriness > 0 {
+            guard let originalGlow = glowInput else {
+                throw PAGError.renderingFailure("fastBlurMissingGlow")
+            }
+            // Glow先完整合并到局部BGRA8，FastBlur只能读取顺序在前的已量化结果。
+            let result = try attachFastBlur(blur, clip: scope.compositionClip,
+                original: loan, glow: originalGlow, rect: rect, contentPassIndex: contentPassIndex)
+            resultTexture = result.texture
+            resultRect = result.rect
+            glowInput = nil
+        }
         let mesh = try resources.rectangle(budget: &budget)
         var matrix: SceneAffine
         let tileUniforms: MetalMotionTileUniforms?
@@ -350,19 +458,22 @@ struct MetalFrameBuilder {
                 blurUniforms = nil
             }
         } else {
-            matrix = try SceneAffine.scale(x: Double(rect.width), y: Double(rect.height))
-                .following(.translation(x: Double(rect.x), y: Double(rect.y)))
+            matrix = try SceneAffine.scale(x: Double(resultRect.width), y: Double(resultRect.height))
+                .following(.translation(x: Double(resultRect.x), y: Double(resultRect.y)))
             tileUniforms = nil
             contentMap = nil
             blurUniforms = nil
         }
-        // MotionTile扩出的输出不能再被原输入合成边界裁掉；只继承进入前的祖先裁剪。
-        let outputClips = scope.motionTile == nil ? scope.compositeClips : scope.previous
-        try append(mesh: mesh, texture: loan.texture, matrix: matrix,
+        // 平铺及透明边缘Blur扩出的输出不能再被原输入预合成边界截掉。
+        let extendsSource = scope.motionTile != nil ||
+            (scope.fastBlur?.blurriness ?? 0) > 0 && scope.fastBlur?.repeatEdgePixels == false
+        let outputClips = extendsSource ? scope.previous : scope.compositeClips
+        try append(mesh: mesh, texture: resultTexture, matrix: matrix,
                    color: SIMD4(repeating: Float(scope.opacity)), clips: outputClips,
                    motionTile: tileUniforms, textBulgeMap: contentMap,
                    screenBlend: scope.blendMode == .screen,
-                   levelsGreenOnly: scope.levelsGreenOnly, motionBlur: blurUniforms)
+                   levelsGreenOnly: scope.levelsGreenOnly, motionBlur: blurUniforms,
+                   glow: glowInput)
     }
 
     /// 最终pass始终直接指向drawable，普通图元没有固定中间拷贝。
@@ -402,9 +513,10 @@ struct MetalFrameBuilder {
                                      parentMask: child.parentMask,
                                      uniforms: uniforms, clips: child.clips,
                                      trackMatteMode: child.trackMatteMode, isShadow: child.isShadow,
-                                     screenBlend: child.screenBlend,
+                                     screenBlend: child.screenBlend, hardLightBlend: child.hardLightBlend,
                                      levelsGreenOnly: child.levelsGreenOnly,
-                                     motionBlur: child.motionBlur))
+                                     motionBlur: child.motionBlur, glow: child.glow,
+                                     tileGlowBulge: child.tileGlowBulge))
         }
         passes.append(MetalFramePass(rect: rect, attachment: attachment, draws: encoded))
     }
@@ -429,30 +541,6 @@ struct MetalFrameBuilder {
         let mesh = try resources.rectangle(budget: &budget)
         let matrix = try SceneAffine.scale(x: value.size.width, y: value.size.height).following(value.matrix)
         try append(mesh: mesh, texture: nil, matrix: matrix, color: color(value.color, opacity: value.opacity), clips: clips)
-    }
-
-    /// 输入纹理方向保持顶行在前，替换素材的附加裁剪只作用于本次绘制。
-    mutating func image(_ value: FrameImage) throws {
-        guard let image = frame.images[value.resourceID], image.size == value.pixelSize else {
-            throw PAGError.renderingFailure("metalImageResource")
-        }
-        let texture = try resources.image(image, budget: &budget)
-        let mesh = try resources.rectangle(budget: &budget)
-        let matrix: SceneAffine
-        if value.cornerPin != nil {
-            matrix = try value.bulge == nil ? MetalCornerPinGeometry.outputMatrix(for: value) :
-                MetalBulgeGeometry.outputMatrix(for: value)
-        } else if value.motionTile != nil { matrix = try MetalMotionTileGeometry.outputMatrix(for: value) }
-        else if value.bulge != nil { matrix = try MetalBulgeGeometry.outputMatrix(for: value) }
-        else { matrix = try SceneAffine.scale(x: image.size.width, y: image.size.height).following(value.matrix) }
-        let tile = try value.motionTile.map { try MetalMotionTileUniforms($0) }
-        let bulge = try value.bulge.map { try MetalBulgeUniforms($0) }
-        let corner = try value.cornerPin.map { try MetalCornerPinUniforms($0) }
-        var localClips = clips
-        if let clip = value.clip { try localClips.append(clip) }
-        let alpha = try MetalDrawUniforms.premultiplied(red: 1, green: 1, blue: 1, alpha: value.opacity)
-        try append(mesh: mesh, texture: texture, matrix: matrix, color: alpha,
-                   clips: localClips, motionTile: tile, bulge: bulge, cornerPin: corner)
     }
 
     /// Text的完整轮次先合成为真实字形有界纹理，Bulge在根drawable按父合成输入域反采样。
@@ -490,7 +578,9 @@ struct MetalFrameBuilder {
         let mesh = try resources.rectangle(budget: &budget)
         let matrix = try SceneAffine.scale(x: value.pixelSize.width, y: value.pixelSize.height).following(value.matrix)
         let alpha = try MetalDrawUniforms.premultiplied(red: 1, green: 1, blue: 1, alpha: value.opacity)
-        try append(mesh: mesh, texture: nil, matrix: matrix, color: alpha, clips: clips, video: input)
+        var localClips = clips
+        if let clip = value.clip { try localClips.append(clip) }
+        try append(mesh: mesh, texture: nil, matrix: matrix, color: alpha, clips: localClips, video: input)
     }
 
     /// 一个复合路径只有一次填充，不能将其轮廓分别SrcOver。
@@ -544,7 +634,10 @@ struct MetalFrameBuilder {
                                  cornerPin: MetalCornerPinUniforms? = nil,
                                  textBulgeMap: MetalTextBulgeMap? = nil,
                                  screenBlend: Bool = false, levelsGreenOnly: Bool = false,
-                                 motionBlur: MetalMotionBlurUniforms? = nil) throws {
+                                 hardLightBlend: Bool = false,
+                                 motionBlur: MetalMotionBlurUniforms? = nil,
+                                 glow: MetalGlowInput? = nil,
+                                 tileGlowBulge: MetalTileGlowBulgeInput? = nil) throws {
         guard let limit, !clips.isEmpty, color.w > 0 else { return }
         let currentMask = maskDeferred ? nil : maskScope?.input
         let parentMask = maskDeferred ? nil : parentMaskScope?.input
@@ -555,7 +648,7 @@ struct MetalFrameBuilder {
         guard parentMask == nil || (mask != nil && inheritedMask == nil &&
             texture != nil && video == nil && gradient == nil &&
             featherMaskTexture == nil && trackMatteMode == nil && !isShadow && motionTile == nil &&
-            bulge == nil && cornerPin == nil && textBulgeMap == nil) else {
+            bulge == nil && cornerPin == nil && textBulgeMap == nil && tileGlowBulge == nil) else {
             throw PAGError.unsupportedFeature("nestedMaskPaths")
         }
         guard mask == nil || featherMaskTexture == nil || trackMatteMode != nil,
@@ -583,7 +676,9 @@ struct MetalFrameBuilder {
                                       motionTile: motionTile, bulge: bulge, cornerPin: cornerPin,
                                       textBulgeMap: textBulgeMap,
                                       parentMask: parentMask, screenBlend: screenBlend,
-                                      levelsGreenOnly: levelsGreenOnly, motionBlur: motionBlur))
+                                      hardLightBlend: hardLightBlend,
+                                      levelsGreenOnly: levelsGreenOnly, motionBlur: motionBlur,
+                                      glow: glow, tileGlowBulge: tileGlowBulge))
     }
 
     /// 源RGB字节按统一数值域归一化，并且只预乘一次当前图元opacity。

@@ -48,10 +48,10 @@ enum MetalTrackMattePreparation {
         var trial = budget
         let ownerBounds = try FeatherMaskContentBounds.measure(content, frame: frame,
             layerMatrix: .identity, resources: resources, budget: &trial,
-            allowDropShadow: true)
+            allowDropShadow: true, allowTrackMatte: true, allowConservativeMasks: true)
         let sourceBounds = try FeatherMaskContentBounds.measure(source, frame: frame,
             layerMatrix: .identity, resources: resources, budget: &trial,
-            allowDropShadow: true)
+            allowDropShadow: true, allowTrackMatte: true, allowConservativeMasks: true)
         guard let ownerBounds, let visible else {
             budget = trial
             return nil

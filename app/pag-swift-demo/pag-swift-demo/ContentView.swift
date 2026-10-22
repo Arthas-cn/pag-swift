@@ -8,8 +8,18 @@ struct ContentView: View {
     /// 相对resources的路径；验收可用启动参数选样例，切换由task负责取消旧载入。
     @State private var sample = CommandLine.arguments.first { $0.hasPrefix("--pag-sample=") }
         .map { String($0.dropFirst("--pag-sample=".count)) } ?? "srgb.pag"
-    /// 开启时用四角色块替换全部可编辑图片槽，关闭后重新载入原始快照。
-    @State private var replacesImages = CommandLine.arguments.contains("--pag-replace-images")
+    /// 现有Demo的媒体替换选择；旧静图启动参数仍映射到PNG。
+    @State private var media = DemoMediaChoice(rawValue: CommandLine.arguments.first { $0.hasPrefix("--pag-media=") }
+        .map { String($0.dropFirst("--pag-media=".count)) } ?? "") ??
+        (CommandLine.arguments.contains("--pag-replace-images") ? .png : .original)
+    /// 只替换当前选择的一个图片槽；稳定验收样例默认选 scene.png。
+    @State private var imageSlot = 0
+    /// 本次动态文字的实际策略，启动参数兼容原有跑马灯验收。
+    @State private var textLayout: DemoTextLayout = CommandLine.arguments.contains("--pag-marquee") ? .marquee : .original
+    /// 输入框草稿不会在每次敲键时中断播放器。
+    @State private var textDraft = String(repeating: "PAG Swift ", count: 12)
+    /// 用户点击应用后才交给宿主 tag 回调的文字。
+    @State private var appliedText = String(repeating: "PAG Swift ", count: 12)
     /// 归一化定位值，结束拖动时向库发seek。
     @State private var progress = 0.0
     /// 共享缩放选项，实际换算由库完成。
@@ -58,7 +68,8 @@ struct ContentView: View {
                     Text("路径裁剪 test").tag("test.pag")
                     Text("路径裁剪圆环").tag("wstask_circle.pag")
                     Text("文本").tag("editing/TEXT04.pag")
-                    Text("图片").tag("editing/ImageDecodeTest.pag")
+                    Text("动态素材验收（稳定槽）").tag("editing/replace.pag")
+                    Text("图片三槽分段").tag("editing/ImageDecodeTest.pag")
                     Text("位图序列").tag("RootLayerBitmap.pag")
                     Text("位图冻结帧").tag("RootLayerBitmapFreeze.pag")
                     Text("位图时间偏移").tag("RootLayerBitmapOffset.pag")
@@ -71,8 +82,46 @@ struct ContentView: View {
                     Text("透明粒子视频").tag("particle_video.pag")
                     Text("图片与视频合成").tag("2")
                     Text("含音频元数据 TZ2").tag("TZ2.pag")
+                    Text("合并路径 list/3").tag("list/3.pag")
+                    Text("轨道遮罩 list/7").tag("list/7.pag")
+                    Text("渐变叠加 LOGO").tag("PAG_LOGO.pag")
+                    Text("图层混合 tougao").tag("tougao.pag")
+                    Text("复杂蒙版 travel").tag("travel.pag")
+                    Text("组合效果 clip1").tag("nodegroup_clip1.pag")
+                    Text("动态模糊 2J").tag("2J.pag")
+                    Text("动态模糊 MT2").tag("MT2.pag")
                 }
-                Toggle("替换全部可编辑图片", isOn: $replacesImages)
+                if sample == "editing/replace.pag" || sample == "editing/ImageDecodeTest.pag" {
+                    Picker("图片槽素材", selection: $media) {
+                        ForEach(DemoMediaChoice.allCases, id: \.self) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                }
+                if sample == "editing/ImageDecodeTest.pag" {
+                    Picker("替换图片槽", selection: $imageSlot) {
+                        Text("标志 512-logo.png · 索引 0").tag(0)
+                        Text("场景 scene.png · 索引 1").tag(1)
+                        Text("前景 test.png · 索引 2").tag(2)
+                    }
+                }
+                if sample == "editing/replace.pag" {
+                    Picker("替换图片槽", selection: $imageSlot) {
+                        Text("场景 scene.png · 索引 0").tag(0)
+                        Text("照片 rotation.jpg · 索引 1").tag(1)
+                    }
+                }
+                if sample == "editing/TEXT04.pag" {
+                    Picker("动态文字", selection: $textLayout) {
+                        ForEach(DemoTextLayout.allCases, id: \.self) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    HStack {
+                        TextField("按图层名替换的文字", text: $textDraft)
+                        Button("应用文字") { appliedText = textDraft }
+                    }
+                }
                 HStack {
                     Button("播放") { session.perform(.play) }
                     Button("暂停") { session.perform(.pause) }
@@ -118,10 +167,12 @@ struct ContentView: View {
         }
         .frame(minWidth: 300)
         .task { await session.observe() }
-        .task(id: DemoSelection(path: sample, replacesImages: replacesImages)) {
+        .task(id: DemoSelection(path: sample, media: media, imageSlot: imageSlot,
+                                textLayout: textLayout, text: appliedText)) {
             // 新快照从首帧安装，不能让手动定位条沿用上一个素材的数值。
             progress = 0
-            await session.load(sample, replacingImages: replacesImages)
+            await session.load(sample, media: media, imageSlot: imageSlot,
+                               dynamicText: appliedText, textLayout: textLayout)
         }
         .task(id: session.isLoaded) {
             guard session.isLoaded, DemoHostVerification.isRequested, !didStartVerification else { return }
@@ -129,7 +180,9 @@ struct ContentView: View {
             verificationResult = await DemoHostVerification(
                 swiftUIPlayer: session.swiftUIPlayer, nativePlayer: session.nativePlayer,
                 setMounted: { isMounted = $0 }, setNativeHidden: { isNativeHidden = $0 },
-                setHeight: { verificationHeight = $0 }
+                setHeight: { verificationHeight = $0 },
+                // clip1旧故障在4秒后才出现，验收终帧必须越过该效果层起点。
+                finalFrameTime: PAGTime(microseconds: sample == "nodegroup_clip1.pag" ? 4_250_000 : 2_000_000)
             ).run()
             // 验收结束后恢复手动布局开关，不能让临时零尺寸/固定高度继续覆盖用户操作。
             isCompact = true
@@ -155,6 +208,12 @@ struct ContentView: View {
 private struct DemoSelection: Hashable {
     /// 相对仓库resources的真实样例路径。
     let path: String
-    /// 是否使用库的图片替换API，false恢复原文件输入。
-    let replacesImages: Bool
+    /// 由库加载并替换的可选素材，original恢复原文件输入。
+    let media: DemoMediaChoice
+    /// 本轮只替换的可编辑图片索引。
+    let imageSlot: Int
+    /// 可编辑文字的自动字号、截断或滚动选择。
+    let textLayout: DemoTextLayout
+    /// 点击应用后锁定的内容，不随输入框每次敲键变化。
+    let text: String
 }

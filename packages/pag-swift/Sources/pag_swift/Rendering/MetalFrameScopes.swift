@@ -46,6 +46,12 @@ struct MetalGroupScope {
     let motionTile: FrameMotionTile?
     /// tag63当前相对上一内容帧的非零矩阵差，仅在完整效果后应用。
     let motionBlur: MotionBlurSampling?
+    /// 整组内容合成后执行的唯一Glow；子图元不继承它。
+    let glow: SampledGlow?
+    /// MotionTile→Glow之后才执行的预合成Bulge，当前帧不可见时为nil。
+    let tileGlowBulge: SampledBulge?
+    /// Glow后执行的Gaussian参数；nil或零帧不会创建额外附件。
+    let fastBlur: SampledFastBlur?
     /// 平铺输入的完整合成域；局部附件只负责保存实际内容像素。
     let compositionClip: FrameClip?
     /// 子内容在当前绘制数组中的起点。
@@ -92,10 +98,16 @@ struct MetalPendingDraw {
     let parentMask: MetalMaskInput?
     /// 仅完整Screen组的最终结果为true，子图元仍以普通SrcOver绘制。
     let screenBlend: Bool
+    /// Shape整层模糊结果需在片元读取当前颜色附件，以TGFX公式只混合一次。
+    let hardLightBlend: Bool
     /// 仅tag57已证实的静态参数取值在最终绘回时归零红蓝。
     let levelsGreenOnly: Bool
     /// tag63的37采样常量；只允许附于完整Screen+Levels+MotionTile结果。
     let motionBlur: MetalMotionBlurUniforms?
+    /// Glow第二轴局部结果与阈值；原图仍在texture中。
+    let glow: MetalGlowInput?
+    /// 层115有界MotionTile→Glow→Bulge结果的第二纹理与完整域映射。
+    let tileGlowBulge: MetalTileGlowBulgeInput?
 }
 
 /// 一条图层mask在组栈中的边界及零面积恢复信息，不跨请求共享。

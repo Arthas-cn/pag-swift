@@ -20,7 +20,29 @@ enum StillImageDecoder {
             if count > 1 { throw PAGError.unsupportedAnimatedImage(type) }
             throw PAGError.mediaFailure("missingImageFrame")
         }
-        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+        return PAGImage(storage: try decodeFrame(source: source, type: type, index: 0,
+            identity: identity, maximumDecodedBytes: maximumDecodedBytes))
+    }
+
+    /// 对动态图的指定帧仍使用同一方向、色域及三份暂存预算；系统返回完整画布时才接受。
+    static func decodeFrame(_ data: Data, index: Int, identity: DocumentIdentity,
+                            maximumDecodedBytes: Int) throws -> StillImageStorage {
+        try Task.checkCancellation()
+        guard let source = CGImageSourceCreateWithData(data as CFData,
+            [kCGImageSourceShouldCache: false] as CFDictionary),
+            let rawType = CGImageSourceGetType(source),
+            CGImageSourceGetCount(source) > index, index >= 0 else {
+            throw PAGError.mediaFailure("missingImageFrame")
+        }
+        return try decodeFrame(source: source, type: rawType as String, index: index,
+            identity: identity, maximumDecodedBytes: maximumDecodedBytes)
+    }
+
+    /// 从已经验证的ImageIO帧源规范化完整RGBA输入，不保留跨隔离CGImage对象。
+    private static func decodeFrame(source: CGImageSource, type: String, index: Int,
+                                    identity: DocumentIdentity,
+                                    maximumDecodedBytes: Int) throws -> StillImageStorage {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
               let rawWidth = properties[kCGImagePropertyPixelWidth as String] as? NSNumber,
               let rawHeight = properties[kCGImagePropertyPixelHeight as String] as? NSNumber,
               let width = Int(exactly: rawWidth.doubleValue), let height = Int(exactly: rawHeight.doubleValue),
@@ -42,9 +64,9 @@ enum StillImageDecoder {
             kCGImageSourceShouldCacheImmediately: true
         ]
         // maxPixelSize 等于原图最大边，不缩小输入；系统变换负责八种 EXIF 方向。
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary),
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, thumbnailOptions as CFDictionary),
               image.width == targetWidth, image.height == targetHeight,
-              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else {
+              CGImageSourceGetStatusAtIndex(source, index) == .statusComplete else {
             throw PAGError.mediaFailure("incompleteImage")
         }
         try Task.checkCancellation()
@@ -62,7 +84,7 @@ enum StillImageDecoder {
         }
         try Task.checkCancellation()
         let size = try PAGSize(width: Double(targetWidth), height: Double(targetHeight))
-        return PAGImage(storage: StillImageStorage(identity: identity, size: size, pixels: pixels, bytesPerRow: rowBytes,
-                                                   sourceType: type, sourceOrientation: orientation))
+        return StillImageStorage(identity: identity, size: size, pixels: pixels, bytesPerRow: rowBytes,
+                                 sourceType: type, sourceOrientation: orientation)
     }
 }

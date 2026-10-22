@@ -30,6 +30,26 @@ struct MetalTextBulgeMap {
             throw PAGError.unsupportedFeature("textBulgeMapping")
         }
     }
+
+    /// MotionBlur的完整内容域可能只是合成内一段有界区域，映射不能擅自改成合成全幅。
+    init(effectBounds: RenderBounds, effectMatrix: SceneAffine,
+         rect: RenderPixelRect) throws {
+        let origin = try effectMatrix.applying(to:
+            ScenePoint(x: effectBounds.left, y: effectBounds.top))
+        let right = try effectMatrix.applying(to:
+            ScenePoint(x: effectBounds.right, y: effectBounds.top))
+        let bottom = try effectMatrix.applying(to:
+            ScenePoint(x: effectBounds.left, y: effectBounds.bottom))
+        horizontal = SIMD4(Float((right.x - origin.x) / Double(rect.width)),
+            Float((bottom.x - origin.x) / Double(rect.width)),
+            Float((origin.x - Double(rect.x)) / Double(rect.width)), 0)
+        vertical = SIMD4(Float((right.y - origin.y) / Double(rect.height)),
+            Float((bottom.y - origin.y) / Double(rect.height)),
+            Float((origin.y - Double(rect.y)) / Double(rect.height)), 0)
+        guard (0..<4).allSatisfy({ horizontal[$0].isFinite && vertical[$0].isFinite }) else {
+            throw PAGError.unsupportedFeature("motionBlurMapping")
+        }
+    }
 }
 
 /// 当前Text层一次有界内容合成的GPU工作，结果由根pass直接采样并绘回drawable。

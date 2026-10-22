@@ -7,6 +7,14 @@ struct MetalBulgeUniforms {
     /// x为凸出高度，y为pinning开关，其余分量固定零。
     let heightAndPinning: SIMD4<Float>
 
+    /// 已由内部调用点固定的四向量占位值；仅供未启用Bulge的融合材质保持MSL布局。
+    init(centerAndRadii: SIMD4<Float>, outputRect: SIMD4<Float>,
+         heightAndPinning: SIMD4<Float>) {
+        self.centerAndRadii = centerAndRadii
+        self.outputRect = outputRect
+        self.heightAndPinning = heightAndPinning
+    }
+
     /// 双精度计划转为Metal Float，溢出或非正半径不发布GPU命令。
     init(_ value: FrameBulge) throws {
         centerAndRadii = SIMD4(Float(value.center.x), Float(value.center.y),

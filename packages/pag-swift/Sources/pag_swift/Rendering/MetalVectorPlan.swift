@@ -82,6 +82,22 @@ struct MetalVectorPlan {
                 guard case .shadow? = scopes.popLast() else {
                     throw PAGError.renderingFailure("metalUnbalancedDropShadow")
                 }
+            case .beginGradientOverlay:
+                // 样式读取整层局部纹理，不能被定义级Vector快照当作普通Shape填充。
+                if !vectors.isEmpty { throw PAGError.renderingFailure("metalVectorGradientOverlay") }
+                scopes.append(.gradientOverlay)
+            case .endGradientOverlay:
+                guard case .gradientOverlay? = scopes.popLast() else {
+                    throw PAGError.renderingFailure("metalUnbalancedGradientOverlay")
+                }
+            case .beginShapeBlurBlend:
+                // 局部滤镜和HardLight读取父目标，不能把其结果当作普通Vector子图元。
+                if !vectors.isEmpty { throw PAGError.renderingFailure("metalVectorShapeBlurBlend") }
+                scopes.append(.shapeBlurBlend)
+            case .endShapeBlurBlend:
+                guard case .shapeBlurBlend? = scopes.popLast() else {
+                    throw PAGError.renderingFailure("metalUnbalancedShapeBlurBlend")
+                }
             case .beginOpacityGroup:
                 scopes.append(.opacity)
             case .endOpacityGroup:
@@ -163,6 +179,10 @@ private enum Scope {
     case mask
     /// 图层投影的独立源内容边界，不属于父Vector缓存范围。
     case shadow
+    /// 整层GradientOverlay的独立源内容边界，不属于父Vector缓存范围。
+    case gradientOverlay
+    /// Shape局部模糊与最终图层混合边界。
+    case shapeBlurBlend
     /// 不带clip的外层或内部alpha。
     case opacity
     /// Shape/Text内容范围的起点与源身份。

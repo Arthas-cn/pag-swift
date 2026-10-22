@@ -26,8 +26,9 @@ import pag_swift
     /// 取消尚未完成的控制，不留下无主命令。
     isolated deinit { command?.cancel() }
 
-    /// SwiftUI的task(id:)提供取消；可把全部编辑槽替换为四角色块，库负责后台读盘和解码。
-    func load(_ path: String, replacingImages: Bool) async {
+    /// SwiftUI的task(id:)提供取消；只给选中的图片槽安装素材，文字走类型化tag入口。
+    func load(_ path: String, media: DemoMediaChoice, imageSlot: Int,
+              dynamicText: String, textLayout: DemoTextLayout) async {
         let id = UUID()
         loadID = id
         isLoading = true
@@ -43,10 +44,53 @@ import pag_swift
             }
             let file = try await PAGLoader.shared.load(from: resources.appending(path: path))
             var composition = file.composition
-            if replacingImages && !file.editableImageIndices.isEmpty {
-                let image = try await PAGImage.load(from: resources.appending(path: "media/rgba-corners.png"))
-                // 只通过公开编辑合同安装快照；两个宿主共享相同素材，适配和裁剪仍由库完成。
-                for index in file.editableImageIndices { try composition.replaceImage(image, at: index) }
+            if media != .original, let index = file.editableImageIndices.contains(imageSlot) ?
+                imageSlot : file.editableImageIndices.first {
+                let imageURL: URL
+                switch media {
+                case .original: throw PAGError.invalidArgument("demoMedia")
+                case .png: imageURL = resources.appending(path: "media/rgba-corners.png")
+                case .gif: imageURL = resources.appending(path: "media/bear.gif")
+                case .webp: imageURL = resources.appending(path: "media/webp01.webp")
+                case .video: imageURL = resources.appending(path: "game.mp4")
+                }
+                let placeholder = media == .video ?
+                    try await PAGImage.load(from: resources.appending(path: "media/rgba-corners.png")) : nil
+                // 同一 PAG 中的三个图层有不同位置和尺寸；全槽替换会叠出多个大小不同的画面。
+                let targets = file.composition.layers.filter { $0.editableIndex == index && $0.kind == .image }
+                if let tag = targets.first?.name, !tag.isEmpty,
+                   file.composition.layers(named: tag).filter({ $0.kind == .image }).count == targets.count {
+                    try await composition.apply(.imageURL(imageURL), forTag: tag) { url in
+                        if media == .video { return try await PAGImage.loadVideo(from: url) }
+                        return try await PAGImage.load(from: url)
+                    }
+                } else {
+                    let image = media == .video ? try await PAGImage.loadVideo(from: imageURL) :
+                        try await PAGImage.load(from: imageURL)
+                    try composition.replaceImage(image, at: index)
+                }
+                if path == "editing/ImageDecodeTest.pag" || path == "editing/replace.pag" {
+                    // 两份编辑夹具的图片层相互重叠；验收当前槽时隐藏其它层，避免原图盖住动图。
+                    for layer in file.composition.layers where layer.kind == .image && layer.editableIndex != index {
+                        try composition.setVisibility(false, for: layer.id)
+                    }
+                }
+                if let placeholder { try composition.setPlaceholder(placeholder, at: index) }
+            }
+            if !dynamicText.isEmpty, let index = file.editableTextIndices.first {
+                let name = file.composition.layers.first(where: {
+                    $0.editableIndex == index && $0.kind == .text
+                })?.name ?? ""
+                let tag = name.isEmpty ? "text:\(index)" : name
+                let layout: DynamicTextLayout = switch textLayout {
+                case .original: .automatic
+                case .automatic: .automatic
+                case .truncate: .truncate
+                case .marquee: .marquee(try PAGMarqueeOptions(speed: 45, gap: 24))
+                }
+                if textLayout != .original {
+                    try await composition.apply(.text(dynamicText, layout: layout), forTag: tag)
+                }
             }
             for player in [swiftUIPlayer, nativePlayer] {
                 try Task.checkCancellation()
@@ -101,6 +145,53 @@ import pag_swift
             let text = "\(snapshot.state) · \(time)"
             if isNative { nativeStatus = text } else { swiftUIStatus = text }
             if let failure = snapshot.failure { errorMessage = String(describing: failure) }
+        }
+    }
+}
+
+/// Demo 逐项展示动态文本合同，原始选项不替换 PAG 源文字。
+enum DemoTextLayout: String, CaseIterable, Hashable {
+    /// 不编辑文字或附加溢出行为。
+    case original
+    /// 使用源文本框自动字号规则。
+    case automatic
+    /// 单行超框时显示省略号。
+    case truncate
+    /// 原字号超框时在文本框内滚动。
+    case marquee
+
+    /// 选择器中向用户解释实际呈现行为。
+    var title: String {
+        switch self {
+        case .original: "原始文字"
+        case .automatic: "自动字号"
+        case .truncate: "尾部截断"
+        case .marquee: "跑马灯"
+        }
+    }
+}
+
+/// 现有Demo的单一图片槽替换来源；两个宿主始终消费同一选择。
+enum DemoMediaChoice: String, CaseIterable, Hashable, Sendable {
+    /// 使用原始PAG内嵌素材。
+    case original
+    /// 使用静态PNG核对单帧替换。
+    case png
+    /// 使用多帧GIF核对逐帧显示。
+    case gif
+    /// 使用动画WebP核对系统逐帧能力。
+    case webp
+    /// 使用静音MP4核对系统NV12输入与占位。
+    case video
+
+    /// 供同一个样例选择器显示的中文名称。
+    var title: String {
+        switch self {
+        case .original: "原始素材"
+        case .png: "静态 PNG"
+        case .gif: "动画 GIF"
+        case .webp: "动画 WebP"
+        case .video: "MP4 视频"
         }
     }
 }

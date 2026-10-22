@@ -82,6 +82,7 @@ enum MaskBooleanTessellation {
         try budget.reserve(operands.count, stride: 32)
         var windings = [Int](repeating: 0, count: operands.count * 2)
         let outside = try evaluate(operands, windings: windings, budget: &budget)
+        let differenceOnly = operands.allSatisfy { $0.mode == .difference && $0.expansion == 0 }
         guard !edges.isEmpty else {
             return MaskBooleanResult(mesh: RenderMesh(origin: origin, vertices: []), isInverted: outside)
         }
@@ -138,7 +139,7 @@ enum MaskBooleanTessellation {
             try Task.checkCancellation()
             try fillBand(lower: lower, upper: upper, crossings: active, edges: edges, owners: owners,
                          operands: operands, windings: &windings, outside: outside,
-                         vertices: &vertices, budget: &budget)
+                         differenceOnly: differenceOnly, vertices: &vertices, budget: &budget)
         }
         try Task.checkCancellation()
         return MaskBooleanResult(mesh: RenderMesh(origin: origin, vertices: vertices), isInverted: outside)
@@ -200,23 +201,31 @@ enum MaskBooleanTessellation {
     /// 同坐标的重合边必须一起更新所有路径绕数，只在最终有限状态进出时吐三角形。
     private static func fillBand(lower: Double, upper: Double, crossings: [ScanCrossing],
                                  edges: [ScanBoundary], owners: [Int], operands: [MaskBooleanOperand],
-                                 windings: inout [Int], outside: Bool, vertices: inout [ScenePoint],
+                                 windings: inout [Int], outside: Bool, differenceOnly: Bool,
+                                 vertices: inout [ScenePoint],
                                  budget: inout GeometryBudget) throws {
         var left: Int?
         var index = 0
+        var parity = outside
         while index < crossings.count {
             try budget.consume()
             let start = index
-            let before = try evaluate(operands, windings: windings, budget: &budget) != outside
+            // 全Difference且无扩张时，只需更新经过这条边的项；其它模式保持完整有序折叠。
+            let before = differenceOnly ? parity != outside
+                : try evaluate(operands, windings: windings, budget: &budget) != outside
             repeat {
                 // 多条完全重合的边也要逐条计费和检查取消，不能只为整组收费一次。
                 try budget.consume()
                 let edgeIndex = crossings[index].edge
-                windings[owners[edgeIndex]] += edges[edgeIndex].winding
+                let slot = owners[edgeIndex]
+                let wasFilled = differenceOnly && windings[slot] != 0
+                windings[slot] += edges[edgeIndex].winding
+                if differenceOnly, wasFilled != (windings[slot] != 0) { parity.toggle() }
                 index += 1
             } while index < crossings.count && crossings[index].lowerX == crossings[start].lowerX
                 && crossings[index].upperX == crossings[start].upperX
-            let after = try evaluate(operands, windings: windings, budget: &budget) != outside
+            let after = differenceOnly ? parity != outside
+                : try evaluate(operands, windings: windings, budget: &budget) != outside
             if !before && after { left = crossings[start].edge }
             else if before && !after {
                 guard let boundary = left else { throw PAGError.renderingFailure("maskBooleanWinding") }

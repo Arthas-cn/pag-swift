@@ -22,9 +22,12 @@ extension PAGSceneDecoder {
         var textPath: SourceTextPathOption?
         var textAnimators: [SourceTextAnimator] = []
         var dropShadows: [SourceDropShadow] = []
+        var gradientOverlay: SourceGradientOverlay?
         var motionTile: SourceMotionTile?
         var bulge: SourceBulge?
         var cornerPin: SourceCornerPin?
+        var glow: SourceGlow?
+        var fastBlur: SourceFastBlur?
         var levelsGreenOnly = false
         var imageEffectOrder: [UInt16] = []
         var precompositionEffectOrder: [UInt16] = []
@@ -78,6 +81,9 @@ extension PAGSceneDecoder {
             case 29, 65:
                 // 同一图层可以有多条样式，原编码顺序决定投影彼此的覆盖顺序。
                 dropShadows.append(try readDropShadow(code: block.code, reader: &block.reader))
+            case 85:
+                guard gradientOverlay == nil else { throw PAGError.unsupportedFeature("multipleGradientOverlay") }
+                gradientOverlay = try readGradientOverlay(reader: &block.reader)
             case 56:
                 guard type == 5 || type == 6 else { throw PAGError.unsupportedFeature("motionTileNonImage") }
                 guard motionTile == nil else { throw PAGError.unsupportedFeature("multipleMotionTile") }
@@ -97,10 +103,23 @@ extension PAGSceneDecoder {
                 cornerPin = try readCornerPin(reader: &block.reader)
                 imageEffectOrder.append(58)
             case 59:
-                guard type == 3 || type == 5 else { throw PAGError.unsupportedFeature("bulgeNonImageOrText") }
+                guard type == 3 || type == 5 || type == 6 else {
+                    throw PAGError.unsupportedFeature("bulgeNonImageOrText")
+                }
                 guard bulge == nil else { throw PAGError.unsupportedFeature("multipleBulge") }
                 bulge = try readBulge(reader: &block.reader)
                 imageEffectOrder.append(59)
+                if type == 6 { precompositionEffectOrder.append(59) }
+            case 60:
+                guard type == 6 || type == 4 else { throw PAGError.unsupportedFeature("fastBlurNonPrecomposition") }
+                guard fastBlur == nil else { throw PAGError.unsupportedFeature("multipleFastBlur") }
+                fastBlur = try readFastBlur(reader: &block.reader)
+                if type == 6 { precompositionEffectOrder.append(60) }
+            case 61:
+                guard type == 6 else { throw PAGError.unsupportedFeature("glowNonPrecomposition") }
+                guard glow == nil else { throw PAGError.unsupportedFeature("multipleGlow") }
+                glow = try readGlow(reader: &block.reader)
+                precompositionEffectOrder.append(61)
             default:
                 throw PAGError.unsupportedFeature("layerTag:\(block.code)")
             }
@@ -109,13 +128,37 @@ extension PAGSceneDecoder {
         guard let attributes, let transform else {
             throw PAGError.invalidFile(reason: "missingLayerAttributesOrTransform", offset: nil)
         }
+        if let gradientOverlay {
+            // 当前GPU材质只证明了LOGO的单一Shape Angle样式；其它组合先保持明确门禁。
+            guard type == 4, !shapes.isEmpty, gradientOverlay.supportsAngleWhiteBlack,
+                  attributes.blendMode == .normal, masks.isEmpty, dropShadows.isEmpty,
+                  motionTile == nil, bulge == nil, cornerPin == nil,
+                  glow == nil, fastBlur == nil, imageEffectOrder.isEmpty,
+                  precompositionEffectOrder.isEmpty, attributesExtra?.motionBlur != true else {
+                throw PAGError.unsupportedFeature("gradientOverlay")
+            }
+        }
         if attributesExtra?.motionBlur == true {
             // 上游只比较本层及父层的相邻帧矩阵；仅严格静态且无父层时可证明滤镜每帧跳过。
             let staticSkip = canSkipMotionBlur(transform: transform, parentID: attributes.parentID)
-            // 先开放真实Screen/Levels/静态MotionTile预合成，其他动态组合仍须有独立输入域与材质验证。
+            // Screen平铺、无Effects预合成与图像平铺各有不同输入域，不能共用采样映射。
             let supportedDynamic = type == 6 && attributes.blendMode == .screen &&
                 levelsGreenOnly && motionTile != nil && attributes.parentID == nil
-            guard staticSkip || supportedDynamic else {
+            let plainPrecomposition = type == 6 && attributes.blendMode == .normal &&
+                attributes.parentID == nil && precompositionEffectOrder.isEmpty &&
+                masks.isEmpty && dropShadows.isEmpty
+            let tiledImage = type == 5 && attributes.blendMode == .normal &&
+                attributes.parentID == nil && imageEffectOrder == [56] &&
+                masks.isEmpty && dropShadows.isEmpty &&
+                motionTile?.center.isAnimated == false &&
+                motionTile?.tileWidth.isAnimated == false &&
+                motionTile?.tileHeight.isAnimated == false &&
+                motionTile?.outputWidth.isAnimated == false &&
+                motionTile?.outputHeight.isAnimated == false &&
+                motionTile?.mirrorEdges.isAnimated == false &&
+                motionTile?.phase.isAnimated == false &&
+                motionTile?.horizontalPhaseShift.isAnimated == false
+            guard staticSkip || supportedDynamic || plainPrecomposition || tiledImage else {
                 throw PAGError.unsupportedFeature("motionBlur")
             }
         }
@@ -131,24 +174,44 @@ extension PAGSceneDecoder {
             guard masks.isEmpty else { throw PAGError.unsupportedFeature("motionTileLayerMasks") }
             guard dropShadows.isEmpty else { throw PAGError.unsupportedFeature("motionTileLayerStyle") }
         }
+        let tileGlowBulge = type == 6 && precompositionEffectOrder == [56, 61, 59] &&
+            attributes.blendMode == .normal && attributes.parentID == nil &&
+            masks.isEmpty && dropShadows.isEmpty && glow != nil && fastBlur == nil &&
+            levelsGreenOnly == false &&
+            (attributesExtra?.motionBlur != true ||
+             canSkipMotionBlur(transform: transform, parentID: attributes.parentID))
+        if type == 6, let bulge {
+            // 仅开放有完整局部采样与GPU效果顺序验证的三段组合；非pinning输出范围尚无保守证明。
+            guard tileGlowBulge, !bulge.pinning.isAnimated, bulge.pinning.initialValue else {
+                throw PAGError.unsupportedFeature("bulgePrecomposition")
+            }
+        }
         if type == 6, let tile = motionTile {
-            // 预合成只开放真实[57,56]静态组合，动态平铺或其它颜色链不能误进窄范围片元。
-            guard levelsGreenOnly, attributes.blendMode == .screen,
-                  tile.center.isAnimated == false, tile.tileWidth.isAnimated == false,
-                  tile.tileHeight.isAnimated == false, tile.outputWidth.isAnimated == false,
-                  tile.outputHeight.isAnimated == false, tile.mirrorEdges.isAnimated == false,
-                  tile.phase.isAnimated == false, tile.horizontalPhaseShift.isAnimated == false,
-                  tile.tileWidth.initialValue == 100, tile.tileHeight.initialValue == 100,
-                  tile.outputWidth.initialValue == 300, tile.outputHeight.initialValue == 300,
-                  tile.mirrorEdges.initialValue, tile.phase.initialValue == 0,
-                  !tile.horizontalPhaseShift.initialValue,
-                  precompositionEffectOrder == [57, 56] else {
+            // 静态Screen路径与动态三段效果路径有各自的材质和采样域合同。
+            let screenTile = levelsGreenOnly && attributes.blendMode == .screen &&
+                  tile.center.isAnimated == false && tile.tileWidth.isAnimated == false &&
+                  tile.tileHeight.isAnimated == false && tile.outputWidth.isAnimated == false &&
+                  tile.outputHeight.isAnimated == false && tile.mirrorEdges.isAnimated == false &&
+                  tile.phase.isAnimated == false && tile.horizontalPhaseShift.isAnimated == false &&
+                  tile.tileWidth.initialValue == 100 && tile.tileHeight.initialValue == 100 &&
+                  tile.outputWidth.initialValue == 300 && tile.outputHeight.initialValue == 300 &&
+                  tile.mirrorEdges.initialValue && tile.phase.initialValue == 0 &&
+                  !tile.horizontalPhaseShift.initialValue &&
+                  precompositionEffectOrder == [57, 56]
+            let mappedTile = tileGlowBulge && !tile.outputWidth.isAnimated &&
+                !tile.outputHeight.isAnimated && tile.outputWidth.initialValue == 300 &&
+                tile.outputHeight.initialValue == 300 &&
+                !tile.phase.isAnimated && tile.phase.initialValue == 0 &&
+                !tile.horizontalPhaseShift.isAnimated && !tile.horizontalPhaseShift.initialValue
+            guard screenTile || mappedTile else {
                 throw PAGError.unsupportedFeature("motionTilePrecomposition")
             }
         }
         if bulge != nil {
             // Image直采与Text先合成再取样均不允许图层mask；Text投影在Bulge后由已有外层处理。
-            guard motionTile == nil else { throw PAGError.unsupportedFeature("bulgeMultipleEffects") }
+            guard motionTile == nil || tileGlowBulge else {
+                throw PAGError.unsupportedFeature("bulgeMultipleEffects")
+            }
             guard masks.isEmpty else { throw PAGError.unsupportedFeature("bulgeLayerMasks") }
             guard type == 3 || dropShadows.isEmpty else { throw PAGError.unsupportedFeature("bulgeLayerStyle") }
         }
@@ -161,10 +224,35 @@ extension PAGSceneDecoder {
             guard masks.isEmpty else { throw PAGError.unsupportedFeature("cornerPinLayerMasks") }
             guard dropShadows.isEmpty else { throw PAGError.unsupportedFeature("cornerPinLayerStyle") }
         }
+        let shapeBlurBlend = type == 4 && fastBlur != nil && attributes.blendMode == .hardLight
+        if shapeBlurBlend {
+            // 当前真实层仅含All/Decal FastBlur；其它效果、蒙版或样式会改变源图域与混合顺序。
+            guard let fastBlur, !shapes.isEmpty, glow == nil, gradientOverlay == nil,
+                  masks.isEmpty, dropShadows.isEmpty, motionTile == nil, bulge == nil,
+                  cornerPin == nil, imageEffectOrder.isEmpty, precompositionEffectOrder.isEmpty,
+                  attributesExtra?.motionBlur != true,
+                  fastBlur.direction.initialValue == 0,
+                  fastBlur.repeatEdgePixels.initialValue == false,
+                  !fastBlur.direction.isAnimated, !fastBlur.repeatEdgePixels.isAnimated else {
+                throw PAGError.unsupportedFeature("shapeFastBlurBlend")
+            }
+        } else if glow != nil || fastBlur != nil {
+            // 当前只开放单Glow或真实Glow→FastBlur；其它排列需要独立合成域与顺序验证。
+            let priorGlow = precompositionEffectOrder == [61] ||
+                precompositionEffectOrder == [61, 60]
+            guard priorGlow || tileGlowBulge,
+                  tileGlowBulge || (fastBlur == nil) == (precompositionEffectOrder == [61]),
+                  attributes.blendMode == .normal,
+                  masks.isEmpty, dropShadows.isEmpty,
+                  bulge == nil || tileGlowBulge else {
+                throw PAGError.unsupportedFeature("glowEffectOrder")
+            }
+        }
         if type == 1 { content = .null }
         if type == 4 { content = .shape(shapes) }
         guard let content else { throw PAGError.invalidFile(reason: "missingLayerContent", offset: nil) }
-        guard attributes.blendMode == .normal || type == 6 else {
+        guard attributes.blendMode == .normal ||
+              (attributes.blendMode == .screen && type == 6) || shapeBlurBlend else {
             throw PAGError.unsupportedFeature("layerBlendMode")
         }
         guard !levelsGreenOnly || attributes.blendMode == .screen else {
@@ -177,8 +265,9 @@ extension PAGSceneDecoder {
                            motionBlur: attributesExtra?.motionBlur == true,
                            transform: transform, content: content,
                            masks: masks, textPath: textPath, textAnimators: textAnimators,
-                           dropShadows: dropShadows, motionTile: motionTile, bulge: bulge,
-                           cornerPin: cornerPin, markers: markers,
+                           dropShadows: dropShadows, gradientOverlay: gradientOverlay,
+                           motionTile: motionTile, bulge: bulge,
+                           cornerPin: cornerPin, glow: glow, fastBlur: fastBlur, markers: markers,
                            timing: attributes.timing, imageFillRule: imageFillRule)
     }
 

@@ -6,6 +6,10 @@ struct CompositionEdits: Sendable {
     var texts: [Int: PAGText] = [:]
     /// 每个图像实例当前唯一替换；删除键恢复原始素材，不恢复历史覆盖。
     var images: [PAGLayerID: PAGImage] = [:]
+    /// 每个图像实例的视频待帧占位；只有正常图片素材可作为占位。
+    var placeholders: [PAGLayerID: PAGImage] = [:]
+    /// 可编辑文本槽的附加溢出策略，缺失时完整保留PAG原始排版。
+    var textOverflows: [Int: PAGTextOverflow] = [:]
 }
 
 /// 在完整场景上原子建立编辑覆盖，原始文档与其他快照保持不变。
@@ -27,7 +31,45 @@ extension PAGComposition {
         guard storage.catalog.textSet.contains(index) else { throw PAGError.invalidEditableIndex(index) }
         // PAGText 字段可变，构造时通过验证不代表提交时仍然有效；先验证再修改 COW 表。
         try text?.validate()
+        if case .marquee? = edits.textOverflows[index],
+           let text, text.text.contains(where: { $0.isNewline }) {
+            throw PAGError.unsupportedFeature("marqueeMultiline")
+        }
+        if case .truncate? = edits.textOverflows[index],
+           let text, text.text.contains(where: { $0.isNewline }) {
+            throw PAGError.unsupportedFeature("truncateMultilineOrVertical")
+        }
         edits.texts[index] = text
+    }
+
+    /// 指定文本槽的溢出行为；nil恢复源排版，非法槽、非水平框及多行滚动整体拒绝。
+    public mutating func setTextOverflow(_ overflow: PAGTextOverflow?, at index: Int) throws {
+        guard storage.catalog.textSet.contains(index) else { throw PAGError.invalidEditableIndex(index) }
+        if let overflow {
+            for (compositionIndex, composition) in storage.compositions.enumerated() {
+                for (layerIndex, layer) in composition.layers.enumerated() {
+                    let reference = SourceLayerReference(composition: compositionIndex, layer: layerIndex)
+                    guard storage.catalog.slots[reference] == index,
+                          case .text(let source) = layer.content else { continue }
+                    guard source.isBoxText, source.boxSize.x > 0, source.boxSize.y > 0,
+                          source.direction != 2, layer.textPath == nil else {
+                        throw PAGError.unsupportedFeature("textOverflowLayout")
+                    }
+                    if case .marquee = overflow {
+                        guard !(edits.texts[index] ?? source.style).text.contains(where: { $0.isNewline }) else {
+                            throw PAGError.unsupportedFeature("marqueeMultiline")
+                        }
+                    }
+                    if case .truncate = overflow {
+                        guard source.direction == 0,
+                              !(edits.texts[index] ?? source.style).text.contains(where: { $0.isNewline }) else {
+                            throw PAGError.unsupportedFeature("truncateMultilineOrVertical")
+                        }
+                    }
+                }
+            }
+        }
+        edits.textOverflows[index] = overflow
     }
 
     /// 替换允许图片槽关联的全部实例；nil 删除当前覆盖，恢复各层的原始资源。
@@ -50,7 +92,28 @@ extension PAGComposition {
         for id in matches { edits.images[id] = image }
     }
 
-    /// 删除所有覆盖，恢复文件原始文本、素材与显示开关；不修改其他合成副本。
+    /// 为允许编辑的图片槽全部实例设置或清除占位；视频不能作为等待另一段视频的占位。
+    public mutating func setPlaceholder(_ image: PAGImage?, at index: Int) throws {
+        guard storage.catalog.imageSet.contains(index) else { throw PAGError.invalidEditableIndex(index) }
+        guard image?.kind != .video else { throw PAGError.invalidArgument("placeholder") }
+        for instance in storage.instances {
+            let reference = SourceLayerReference(composition: instance.compositionIndex, layer: instance.layerIndex)
+            let source = storage.compositions[instance.compositionIndex].layers[instance.layerIndex]
+            if case .image = source.content, storage.catalog.slots[reference] == index {
+                edits.placeholders[instance.id] = image
+            }
+        }
+    }
+
+    /// 对名称精确匹配的全部图像实例设置占位；零匹配不改变快照。
+    public mutating func setPlaceholder(_ image: PAGImage?, named name: String) throws {
+        let matches = layers(named: name).filter { $0.kind == .image }.map(\.id)
+        guard !matches.isEmpty else { throw PAGError.noMatchingImageLayer(name) }
+        guard image?.kind != .video else { throw PAGError.invalidArgument("placeholder") }
+        for id in matches { edits.placeholders[id] = image }
+    }
+
+    /// 删除所有覆盖，恢复文件原始文本、素材、占位、溢出策略与显示开关。
     public mutating func resetEdits() {
         edits = CompositionEdits()
     }

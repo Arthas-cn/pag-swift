@@ -18,6 +18,8 @@ struct PlaybackTimeline: Sendable {
     private(set) var duration: PAGTime?
     /// 实际跨过根终点的整轮次数，无限循环时采用饱和计数。
     private(set) var completedIterations: UInt64 = 0
+    /// 可见且主动播放的累计微秒，seek/根循环不回拨，暂停/隐藏不增长。
+    private(set) var activeElapsed: UInt64 = 0
     /// 总次数而非额外重复次数；默认完整播放一次。
     private(set) var repeatCount = 1
     /// 主动播放意图；窗口恢复不能把 false 改成 true。
@@ -39,6 +41,7 @@ struct PlaybackTimeline: Sendable {
         self.duration = duration
         position = .zero
         completedIterations = 0
+        activeElapsed = 0
         wantsPlayback = false
         awaitsFinalFrame = false
         failure = nil
@@ -100,6 +103,7 @@ struct PlaybackTimeline: Sendable {
         try requireUsableComposition()
         position = .zero
         completedIterations = 0
+        activeElapsed = 0
         wantsPlayback = false
         awaitsFinalFrame = false
         anchor = nil
@@ -143,7 +147,19 @@ struct PlaybackTimeline: Sendable {
         guard state == .playing, !awaitsFinalFrame, let anchor, now > anchor,
               let duration else { return false }
         let length = UInt128(duration.microseconds)
-        let elapsed = UInt128(now - anchor) + UInt128(position.microseconds)
+        let delta = UInt128(now - anchor)
+        let elapsed = delta + UInt128(position.microseconds)
+        let credited: UInt128
+        if repeatCount > 0 {
+            // 最后一个tick即使跨出根终点，也只累计有限播放实际可见的剩余时长。
+            let remaining = UInt128(max(0, repeatCount)) > UInt128(completedIterations) ?
+                (UInt128(repeatCount) - UInt128(completedIterations)) * length : 0
+            credited = min(delta, remaining > UInt128(position.microseconds) ?
+                remaining - UInt128(position.microseconds) : 0)
+        } else {
+            credited = delta
+        }
+        activeElapsed = UInt64(min(UInt128(activeElapsed) + credited, UInt128(UInt64.max)))
         let crossings = elapsed / length
         // 等末帧期间位置停在最后可见微秒，但自然终点已计数；恢复后的首个边界只能消费一次。
         let newCrossings = creditedEndpoint && crossings > 0 ? crossings - 1 : crossings

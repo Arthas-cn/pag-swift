@@ -1,33 +1,65 @@
 import Foundation
 
-/// 不暴露 CGImage 或 Metal 对象的不可变替换素材；像素只作为渲染输入。
+/// 不暴露 CGImage 或 Metal 对象的不可变替换素材；动态帧由每播放器媒体owner采样。
 public struct PAGImage: Sendable {
-    /// 后台完整解码并规范化的静态输入资源，跨快照可安全共享。
+    /// 已规范化的静态输入或动图首帧；视频时只保存无像素的尺寸标记，帧走独立媒体owner。
     let storage: StillImageStorage
+    /// GIF/WebP编码快照及时间表；nil为单帧静图。
+    let animation: AnimatedImageStorage?
+    /// 外部视频的已验证容器及时间信息；nil表示图像素材。
+    let video: ExternalVideoStorage?
+
+    /// 保存不可变素材和可选动图时间表；内部逐帧产物不再携带动画来源。
+    init(storage: StillImageStorage, animation: AnimatedImageStorage? = nil) {
+        self.storage = storage
+        self.animation = animation
+        video = nil
+    }
+
+    /// 视频只借静图存储的尺寸与身份字段，不发布假的RGBA帧。
+    init(video: ExternalVideoStorage) {
+        storage = StillImageStorage(identity: video.identity, size: video.size, pixels: Data(),
+            bytesPerRow: 0, sourceType: "pag.externalVideo", sourceOrientation: 1)
+        animation = nil
+        self.video = video
+    }
 
     /// 已应用 EXIF 方向后的原始像素尺寸，不含图层或显示缩放。
     public var size: PAGSize { storage.size }
-    /// 当前工厂支持的资源为单帧静图。
-    public var kind: PAGImageKind { .still }
-    /// 静态素材没有自身播放时长。
-    public var duration: PAGTime? { nil }
+    /// 动图有独立帧表但仍由PAG图层内容时间驱动，不启动第二个显示时钟。
+    public var kind: PAGImageKind { video != nil ? .video : (animation == nil ? .still : .animated) }
+    /// 静态素材为nil，动图为一轮总时长。
+    public var duration: PAGTime? {
+        if let video { return PAGTime(microseconds: video.durationMicroseconds) }
+        return animation.map { PAGTime(microseconds: $0.durationMicroseconds) }
+    }
 
-    /// 从普通本地文件完整解码静图；多帧素材暂抛 unsupportedAnimatedImage，取消保留 CancellationError。
+    /// 从普通本地文件建立静图或有界GIF/WebP时间表；取消保留CancellationError。
     @concurrent public static func load(from url: URL) async throws -> PAGImage {
         let snapshot = try await StableFileReader.read(from: url, limits: .standard)
-        return try StillImageDecoder.decode(snapshot.data, identity: snapshot.identity,
-                                            maximumDecodedBytes: PAGLoadLimits.standard.maximumDecodedBytes)
+        return try AnimatedImageDecoder.decodeIfAnimated(snapshot.data, identity: snapshot.identity,
+            maximumDecodedBytes: PAGLoadLimits.standard.maximumDecodedBytes) ??
+            StillImageDecoder.decode(snapshot.data, identity: snapshot.identity,
+                maximumDecodedBytes: PAGLoadLimits.standard.maximumDecodedBytes)
     }
 
-    /// 从 PNG/JPEG/静态 WebP/单帧 GIF 建立素材；损坏或其他格式失败，不接受 PAG/MP4。
+    /// 从PNG/JPEG/GIF/WebP建立静图或动图素材；损坏及非图像格式失败。
     @concurrent public static func load(data: Data) async throws -> PAGImage {
         let snapshot = try await LoadSnapshot.prepare(data: data, limits: .standard)
-        return try StillImageDecoder.decode(snapshot.data, identity: snapshot.identity,
-                                            maximumDecodedBytes: PAGLoadLimits.standard.maximumDecodedBytes)
+        return try AnimatedImageDecoder.decodeIfAnimated(snapshot.data, identity: snapshot.identity,
+            maximumDecodedBytes: PAGLoadLimits.standard.maximumDecodedBytes) ??
+            StillImageDecoder.decode(snapshot.data, identity: snapshot.identity,
+                maximumDecodedBytes: PAGLoadLimits.standard.maximumDecodedBytes)
     }
+
+    /// 从本地MP4/MOV建立已验证的视频句柄，逐帧解码由播放器媒体owner完成且不输出音频。
+    @concurrent public static func loadVideo(from url: URL) async throws -> PAGImage {
+        try await PAGImage(video: ExternalVideoStorage.load(from: url))
+    }
+
 }
 
-/// 对外描述素材的时间特征；动态工厂按架构在后续阶段实现。
+/// 对外描述素材的时间特征；不暴露媒体解码器或播放控制权。
 public enum PAGImageKind: Sendable, Hashable {
     /// 一份不可变静态输入，不创建媒体时钟。
     case still

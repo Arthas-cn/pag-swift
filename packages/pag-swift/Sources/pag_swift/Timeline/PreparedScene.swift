@@ -10,6 +10,8 @@ struct PreparedScene: Sendable {
     let texts: [SourceLayerReference: PreparedTextLayer]
     /// 静态形状准备的保守累计计费，复用时仍须满足新调用的资源限制。
     let estimatedShapeBytes: Int
+    /// 原字号单行宽度确实超框的文本层；缺失表示保留PAG原始框排版。
+    let marqueeWidths: [SourceLayerReference: Double]
     /// 每个图片实例的根素材时间轴；同文档编辑共享，不在逐帧构建祖先链或裁剪曲线。
     let imageTimes: PreparedImageTimes
     /// 源定义及原始层的Picture请求资格；仅为后续决策提供纯值，不表示已命中GPU快照。
@@ -20,16 +22,29 @@ struct PreparedScene: Sendable {
     let bitmaps: BitmapFrameStore?
     /// 当前播放器的内嵌视频会话与有界输入缓存；其他播放器不可复用该可变owner。
     let videos: VideoFrameStore?
+    /// 编辑快照中的GIF/WebP按内容时间取帧，场景独占有界后台媒体owner。
+    let animatedImages: AnimatedImageFrameStore?
+    /// 编辑快照中的MP4/MOV按图层内容时间取帧，场景独占系统视频会话。
+    let externalVideos: (any ExternalVideoSampling)?
+    /// 可选替换素材的实例级终态诊断；同一准备快照只记首次失败。
+    let optionalMediaFailures: OptionalMediaFailures
+    /// 只有占位实际出现时才建立的辅助时钟，普通素材无额外逐帧状态。
+    let placeholderClock: PresentationActivationClock?
+    /// 只有滚动文字被有效提交后才建立起点；暂停与seek不改变累计播放时间。
+    let marqueeClock: PresentationActivationClock?
 
-    /// 后台准备完整场景资源；同一源存储的旧结果可显式复用静态几何，取消不发布部分结果。
+    /// 后台准备完整场景资源；同一源存储的旧结果可复用静态几何，媒体采样器可供确定性验证注入。
+    /// 取消不发布部分结果，生产调用不注入时建立每场景独占的视频owner。
     @concurrent static func prepare(_ composition: PAGComposition, reusing previous: PreparedScene? = nil,
-                                     maximumBytes: Int = 64 * 1024 * 1024) async throws -> PreparedScene {
+                                     maximumBytes: Int = 64 * 1024 * 1024,
+                                     externalVideoSampler: (any ExternalVideoSampling)? = nil) async throws -> PreparedScene {
         try Task.checkCancellation()
         guard maximumBytes > 0 else { throw PAGError.invalidArgument("maximumPreparedSceneBytes") }
         let reusable = previous?.composition.storage === composition.storage ? previous : nil
         var budget = FramePlanBudget(limit: maximumBytes, resourceName: "maximumPreparedSceneBytes")
         var shapes = reusable?.shapes ?? [:]
         var dynamicTemplates: [SourceLayerReference: [SourceShape]] = [:]
+        var marqueeWidths: [SourceLayerReference: Double] = [:]
         if let reusable { try budget.reserve(stride: reusable.estimatedShapeBytes) }
         var shapeCost = budget.used
         var texts: [SourceLayerReference: PreparedTextLayer] = [:]
@@ -51,13 +66,26 @@ struct PreparedScene: Sendable {
                     try budget.reserve(stride: 256)
                     let slot = composition.storage.catalog.slots[reference]
                     let style = slot.flatMap { composition.edits.texts[$0] } ?? text.style
+                    let overflow = slot.flatMap { composition.edits.textOverflows[$0] }
                     // 同文档不代表同文字；完整样式匹配后才能复用，隐藏也不能跳过未支持文本语义。
-                    if let old = reusable?.texts[reference], old.style == style {
+                    if overflow != .truncate, let old = reusable?.texts[reference], old.style == style,
+                       slot.flatMap({ reusable?.composition.edits.textOverflows[$0] }) == overflow {
                         try budget.reserve(stride: old.estimatedBytes)
                         texts[reference] = old
+                        marqueeWidths[reference] = reusable?.marqueeWidths[reference]
                     } else {
-                        texts[reference] = try TextPreparation.prepare(text, reference: reference,
-                                                                         style: style, budget: &budget)
+                        if case .marquee? = overflow {
+                            let result = try MarqueeTextPreparation.prepare(text, reference: reference,
+                                style: style, budget: &budget)
+                            texts[reference] = result.text
+                            marqueeWidths[reference] = result.scrollingWidth
+                        } else if case .truncate? = overflow {
+                            texts[reference] = try TruncateTextPreparation.prepare(text, reference: reference,
+                                style: style, budget: &budget)
+                        } else {
+                            texts[reference] = try TextPreparation.prepare(text, reference: reference,
+                                style: style, budget: &budget)
+                        }
                     }
                 default: break
                 }
@@ -90,14 +118,35 @@ struct PreparedScene: Sendable {
         }
         let hasBitmaps = composition.storage.compositions.contains { $0.bitmap != nil }
         let hasVideos = composition.storage.compositions.contains { $0.video != nil }
+        let hasAnimatedImages = composition.edits.images.values.contains { $0.animation != nil } ||
+            composition.edits.placeholders.values.contains { $0.animation != nil }
+        let hasExternalVideos = composition.edits.images.values.contains { $0.video != nil }
+        let samePlaceholders = reusable?.composition.edits.placeholders.count == composition.edits.placeholders.count &&
+            composition.edits.placeholders.allSatisfy { entry in
+                guard let previous = reusable?.composition.edits.placeholders[entry.key] else { return false }
+                return previous.kind == entry.value.kind &&
+                    previous.storage.identity == entry.value.storage.identity
+            }
+        let hasMarquee = !marqueeWidths.isEmpty
+        let sameMarquee = reusable?.composition.edits.textOverflows == composition.edits.textOverflows &&
+            reusable?.composition.edits.texts == composition.edits.texts
         let dynamicShapes = try reusable?.dynamicShapes ?? (dynamicTemplates.isEmpty ? nil : PreparedShapeStore(templates: dynamicTemplates))
         // 最后一次分析或同源复用收费后仍可能被撤销；完整场景只有在最终取消检查后才发布。
         try Task.checkCancellation()
         return PreparedScene(composition: composition, shapes: shapes, dynamicShapes: dynamicShapes,
-                             texts: texts, estimatedShapeBytes: shapeCost,
+                             texts: texts, estimatedShapeBytes: shapeCost, marqueeWidths: marqueeWidths,
                              imageTimes: imageTimes, pictureCandidates: pictureCandidates,
                              estimatedPictureAnalysisBytes: pictureCost,
                              bitmaps: hasBitmaps ? reusable?.bitmaps ?? BitmapFrameStore() : nil,
-                             videos: hasVideos ? reusable?.videos ?? VideoFrameStore() : nil)
+                             videos: hasVideos ? reusable?.videos ?? VideoFrameStore() : nil,
+                             animatedImages: hasAnimatedImages ?
+                                reusable?.animatedImages ?? AnimatedImageFrameStore() : nil,
+                             externalVideos: hasExternalVideos ?
+                                externalVideoSampler ?? reusable?.externalVideos ?? ExternalVideoFrameStore() : nil,
+                             optionalMediaFailures: OptionalMediaFailures(),
+                             placeholderClock: composition.edits.placeholders.isEmpty ? nil :
+                                (samePlaceholders ? reusable?.placeholderClock : nil) ?? PresentationActivationClock(),
+                             marqueeClock: hasMarquee ?
+                                (sameMarquee ? reusable?.marqueeClock : nil) ?? PresentationActivationClock() : nil)
     }
 }

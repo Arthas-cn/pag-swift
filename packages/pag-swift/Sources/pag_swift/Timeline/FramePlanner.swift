@@ -3,14 +3,17 @@ enum FramePlanner {
     /// 从已准备快照生成计划；不重建静态路径或触碰 drawable，取消保留 CancellationError。
     @concurrent static func prepare(_ scene: PreparedScene, at time: PAGTime,
                                      targetSize: PAGSize, scale: Double, mode: PAGScaleMode,
-                                     maximumBytes: Int = 64 * 1024 * 1024) async throws -> PreparedFrame {
+                                     maximumBytes: Int = 64 * 1024 * 1024,
+                                     isPlaying: Bool = false,
+                                     auxiliaryTime: PAGTime = .zero) async throws -> PreparedFrame {
         try Task.checkCancellation()
         guard maximumBytes > 0 else { throw PAGError.invalidArgument("maximumFramePlanBytes") }
         let composition = scene.composition
         let sample = try SceneTiming.root(at: time, in: composition.storage)
         let display = try DisplayTransform(contentSize: composition.size, targetSize: targetSize, scale: scale, mode: mode)
         var builder = FramePlanBuilder(scene: scene, time: sample, display: display,
-                                       budget: FramePlanBudget(limit: maximumBytes))
+                                       budget: FramePlanBudget(limit: maximumBytes), isPlaying: isPlaying,
+                                       auxiliaryTime: auxiliaryTime)
         return try await builder.build()
     }
 }
@@ -43,15 +46,26 @@ private struct FramePlanBuilder {
     private var textSamples: [TextSampleKey: PreparedTextLayer] = [:]
     /// 按实际PTS去重的输入交接槽；内部锁只交换引用，裸CV帧不进入构建器。
     private var videos: [VideoFrameID: VideoFrameTransfer] = [:]
+    /// 仅主动播放允许外部视频从正在推进的系统输出取相邻帧。
+    private let isPlaying: Bool
+    /// 当前播放器实际累计播放微秒，不因PAG根循环或普通seek回拨。
+    private let auxiliaryTime: PAGTime
+    /// 本次计划实际选择的占位实例；只有有效GPU完成后才建立其起点。
+    private var placeholderIDs: [PAGLayerID] = []
+    /// 本次计划实际绘制且处于播放状态的滚动文字；提交后才建立辅助时间起点。
+    private var marqueeIDs: [PAGLayerID] = []
     /// 显式预合成遍历栈，避免深场景的递归调用栈增长。
     private var stack: [PlanningContext] = []
 
     /// 接受经验证的快照、请求和显示变换；初始不分配逐层工作数组。
-    init(scene: PreparedScene, time: RootSampleTime, display: DisplayTransform, budget: FramePlanBudget) {
+    init(scene: PreparedScene, time: RootSampleTime, display: DisplayTransform,
+         budget: FramePlanBudget, isPlaying: Bool, auxiliaryTime: PAGTime) {
         self.scene = scene
         self.time = time
         self.display = display
         self.budget = budget
+        self.isPlaying = isPlaying
+        self.auxiliaryTime = auxiliaryTime
     }
 
     /// 完整迭代所有可见实例并生成命令；任何失败丢弃 builder，调用方收不到部分内容。
@@ -128,7 +142,12 @@ private struct FramePlanBuilder {
                     throw SceneValidator.invalid("invalidTrackMatteTopology")
                 }
                 try budget.reserve(stride: 512)
-                try append(.beginTrackMatte(FrameTrackMatte(ownerID: instance.id, mode: state.mode)))
+                let outerHardLight = layer.fastBlur != nil && layer.blendMode == .hardLight
+                let ownerOpacity = outerHardLight ?
+                    try stack[index].sampler.transform(for: instance.layerIndex).opacity : 1
+                try append(.beginTrackMatte(FrameTrackMatte(ownerID: instance.id, mode: state.mode,
+                    ownerBlendMode: outerHardLight ? .hardLight : .normal,
+                    ownerOpacity: ownerOpacity)))
                 // 编码相邻源在公开逆序数组中紧接拥有者；临时栈不加合成组，继承同帧祖先矩阵。
                 stack.append(PlanningContext(instances: [sourceInstanceIndex, instanceIndex], frame: frame,
                     matrix: stack[index].matrix, sampler: stack[index].sampler,
@@ -141,13 +160,31 @@ private struct FramePlanBuilder {
             let matrix = try transform.matrix.following(stack[index].matrix)
             guard try matrix.hasArea() else { continue }
             let hasDropShadow = !layer.dropShadows.isEmpty
+            let hasGradientOverlay = layer.gradientOverlay != nil
+            let hasShapeBlurBlend = layer.fastBlur != nil && layer.blendMode == .hardLight
+            if hasShapeBlurBlend {
+                guard case .shape = layer.content, let blur = try layer.fastBlur?.value(at: frame) else {
+                    throw PAGError.unsupportedFeature("shapeBlurBlendContent")
+                }
+                // 滤镜和混合都读取完整Shape，图层alpha不能进入内部各个填充。
+                try append(.beginShapeBlurBlend(FrameShapeBlurBlend(layerID: instance.id,
+                    matrix: matrix, blur: blur,
+                    opacity: isTrackMatteOwner ? 1 : transform.opacity,
+                    blendMode: isTrackMatteOwner ? .normal : .hardLight)))
+            }
+            if let overlay = layer.gradientOverlay {
+                // 样式读取的是已合成整层alpha，图层自身透明度只能在结果绘回时消费。
+                let angle = try PropertyEvaluation.scalar(overlay.angle, at: frame)
+                try append(.beginGradientOverlay(FrameGradientOverlay(layerID: instance.id,
+                    angle: angle, opacity: transform.opacity)))
+            }
             if hasDropShadow {
                 try append(.beginDropShadow(FrameDropShadow(layerID: instance.id,
                     matrix: matrix, layerMatrix: transform.matrix,
                     styles: layer.dropShadows, opacity: transform.opacity)))
             }
             // 上游图层saveLayer把整体alpha放在滤镜外；阴影源图不能提前乘该alpha。
-            let contentOpacity = hasDropShadow ? 1 : transform.opacity
+            let contentOpacity = hasDropShadow || hasGradientOverlay || hasShapeBlurBlend ? 1 : transform.opacity
             let feather: SampledFeatherMask?
             if layer.masks.contains(where: { $0.feather != nil || $0.opacity.isAnimated || $0.opacity.initialValue != 255 }) {
                 // LayerCache先按完整列表选分支；None或开放路径不能让羽化层退回普通clip。
@@ -179,9 +216,11 @@ private struct FramePlanBuilder {
                 try append(.solid(FrameSolid(layerID: instance.id, size: size, color: color, matrix: matrix,
                                               opacity: contentOpacity)))
             case .image(let id):
-                try image(resourceID: id, instance: instance, matrix: matrix,
+                try await image(resourceID: id, instance: instance, matrix: matrix,
                           opacity: contentOpacity, contentTime: localTime.contentTime,
                           motionTile: layer.motionTile.map { try $0.value(at: frame) },
+                          motionBlur: try sampleMotionBlur(layer: layer, instance: instance,
+                              contentFrame: localTime.contentFrame, current: transform.matrix),
                           bulge: try layer.bulge?.value(at: frame),
                           cornerPin: try layer.cornerPin?.value(at: frame))
             case let .precomposition(id, startFrame):
@@ -191,25 +230,17 @@ private struct FramePlanBuilder {
                 let child = storage.compositions[childIndex]
                 let childFrame = try SceneTiming.precomposition(at: frame, startFrame: startFrame,
                                                                  parentRate: source.frameRate, child: child)
-                let motionBlur: MotionBlurSampling?
-                if layer.motionBlur {
-                    // 首内容帧的上一帧仍是自身；父控制链也必须在那个内容帧重新求值。
-                    let previousFrame = layer.startFrame + max(localTime.contentFrame - 1, 0)
-                    var previousSampler = LayerTransformSampler(source: source,
-                        topology: storage.topologies[instance.compositionIndex], frame: previousFrame)
-                    let previous = try previousSampler.transform(for: instance.layerIndex)
-                    let sampled = try MotionBlurSampling(previous: previous.matrix,
-                                                         current: transform.matrix)
-                    motionBlur = sampled.shouldSkip ? nil : sampled
-                } else {
-                    motionBlur = nil
-                }
+                let motionBlur = try sampleMotionBlur(layer: layer, instance: instance,
+                    contentFrame: localTime.contentFrame, current: transform.matrix)
                 try await enter(compositionIndex: childIndex, instances: instance.children, frame: childFrame,
                           matrix: matrix, opacity: contentOpacity, layerID: instance.id,
                           hasLayerMask: hasLayerMask, hasDropShadow: hasDropShadow,
                           blendMode: layer.blendMode, levelsGreenOnly: layer.levelsGreenOnly,
                           motionTile: try layer.motionTile.map { try FrameMotionTile($0.value(at: frame),
-                              compositionSize: child.size) }, motionBlur: motionBlur)
+                              compositionSize: child.size) }, motionBlur: motionBlur,
+                          glow: try layer.glow?.value(at: frame),
+                          fastBlur: try layer.fastBlur?.value(at: frame),
+                          tileGlowBulge: try layer.bulge?.value(at: frame))
                 enteredPrecomposition = true
             case .null: break
             case .shape:
@@ -221,10 +252,13 @@ private struct FramePlanBuilder {
             }
             if hasLayerMask, !enteredPrecomposition { try append(.endMask) }
             if hasDropShadow, !enteredPrecomposition { try append(.endDropShadow) }
+            if hasGradientOverlay, !enteredPrecomposition { try append(.endGradientOverlay) }
+            if hasShapeBlurBlend { try append(.endShapeBlurBlend) }
         }
         try Task.checkCancellation()
         return PreparedFrame(plan: FramePlan(time: time, targetBounds: display.clipRect, commands: commands),
-                             images: images, shapes: shapes, texts: texts, videos: videos)
+                             images: images, shapes: shapes, texts: texts, videos: videos,
+                             placeholderIDs: placeholderIDs, marqueeIDs: marqueeIDs)
     }
 
     /// 进入一个根/预合成实例；Vector候选将定义clip放进Picture，实例alpha留在范围外。
@@ -234,14 +268,19 @@ private struct FramePlanBuilder {
                                 blendMode: SourceLayerBlendMode = .normal,
                                 levelsGreenOnly: Bool = false,
                                 motionTile: FrameMotionTile? = nil,
-                                motionBlur: MotionBlurSampling? = nil) async throws {
+                                motionBlur: MotionBlurSampling? = nil,
+                                glow: SampledGlow? = nil,
+                                fastBlur: SampledFastBlur? = nil,
+                                tileGlowBulge: SampledBulge? = nil) async throws {
         let storage = composition.storage
         let source = storage.compositions[compositionIndex]
         try budget.reserve(stride: 512)
         try budget.reserve(count: source.layers.count, stride: 128)
         let sampler = LayerTransformSampler(source: source, topology: storage.topologies[compositionIndex], frame: frame)
         // Screen必须在完整子树合成后一次写到背景，可选Vector快照不能跳过这一语义边界。
-        let vector = scene.pictureCandidates.vector[compositionIndex] && blendMode == .normal
+        let vector = composition.edits.textOverflows.isEmpty &&
+            scene.pictureCandidates.vector[compositionIndex] && blendMode == .normal &&
+            glow == nil && fastBlur == nil && motionBlur == nil
         let hasExternalOpacity = vector && opacity != 1 && layerID != nil
         if hasExternalOpacity, let layerID {
             try append(.beginOpacityGroup(FrameOpacityGroup(layerID: layerID, opacity: opacity,
@@ -258,10 +297,13 @@ private struct FramePlanBuilder {
         try append(.beginGroup(FrameGroup(layerID: layerID, frame: frame,
                                            clip: FrameClip(size: source.size, matrix: matrix),
                                            opacity: vector ? 1 : opacity,
-                                           application: blendMode == .screen ? .composite : .perDraw,
+                                           application: blendMode == .screen || glow != nil || fastBlur != nil ||
+                                               motionBlur != nil ?
+                                               .composite : .perDraw,
                                            definitionIndex: compositionIndex, blendMode: blendMode,
                                            levelsGreenOnly: levelsGreenOnly, motionTile: motionTile,
-                                           motionBlur: motionBlur)))
+                                           motionBlur: motionBlur, glow: glow, fastBlur: fastBlur,
+                                           tileGlowBulge: tileGlowBulge)))
         if let bitmap = source.bitmap {
             guard let sequence = bitmap.sequences.last, let store = scene.bitmaps else {
                 throw SceneValidator.invalid("missingPreparedBitmap")
@@ -322,8 +364,9 @@ private struct FramePlanBuilder {
     /// 建立图像像素布局并去重保活输入；原图与替换适配的差别在这里一次确定。
     private mutating func image(resourceID: UInt32, instance: LayerInstance, matrix: SceneAffine,
                                 opacity: Double, contentTime: PAGTime,
-                                motionTile: SampledMotionTile?, bulge: SampledBulge?,
-                                cornerPin: SampledCornerPin?) throws {
+                                motionTile: SampledMotionTile?, motionBlur: MotionBlurSampling?,
+                                bulge: SampledBulge?,
+                                cornerPin: SampledCornerPin?) async throws {
         guard let source = composition.storage.resources.images[resourceID] else {
             throw SceneValidator.invalid("missingImageReference")
         }
@@ -349,9 +392,69 @@ private struct FramePlanBuilder {
             clip = nil
             sampleTime = contentTime
         }
-        let identity = input.storage.identity
         let pixelMatrix = try local.following(matrix)
         guard try pixelMatrix.hasArea() else { return }
+        if replacement != nil, scene.optionalMediaFailures.failure(for: instance.id) != nil {
+            try await optionalImageFallback(for: instance, source: source, matrix: matrix, opacity: opacity)
+            return
+        }
+        if let video = input.video {
+            // 视频直接复用NV12材质；未实现的图片效果不能丢掉后伪称替换画面正确。
+            guard motionTile == nil, motionBlur == nil, bulge == nil, cornerPin == nil else {
+                throw PAGError.unsupportedFeature("externalVideoImageEffects")
+            }
+            guard let owner = scene.externalVideos else {
+                throw SceneValidator.invalid("missingExternalVideoOwner")
+            }
+            let frame: VideoFrameTransfer
+            do {
+                frame = try await owner.frame(for: video, at: sampleTime, isPlaying: isPlaying)
+            } catch let error as PAGError {
+                switch error {
+                case .mediaFailure(let reason) where reason == "externalVideoNotReady" ||
+                    reason == "externalVideoMissingFrame": break
+                case .mediaFailure, .unsupportedFeature, .sourceChanged, .ioFailure:
+                    scene.optionalMediaFailures.record(error, for: instance.id)
+                default: throw error
+                }
+                // 暂不可用或终态失败都不能闪回原图；终态错误留在场景诊断表中。
+                try await optionalImageFallback(for: instance, source: source, matrix: matrix, opacity: opacity)
+                return
+            }
+            try Task.checkCancellation()
+            if composition.edits.placeholders[instance.id] != nil {
+                scene.placeholderClock?.deactivate(instance.id)
+            }
+            let identity = frame.identity
+            if videos[identity] == nil {
+                try budget.reserve(stride: frame.byteCount + 256)
+                videos[identity] = frame
+            }
+            try append(.video(FrameVideo(layerID: instance.id, resourceID: identity,
+                pixelSize: input.size, matrix: pixelMatrix, opacity: opacity, clip: clip)))
+            return
+        }
+        let selected: PAGImage
+        if input.animation != nil {
+            guard let owner = scene.animatedImages else {
+                throw SceneValidator.invalid("missingAnimatedImageOwner")
+            }
+            do {
+                selected = try await owner.frame(for: input, at: sampleTime)
+            } catch let error as PAGError {
+                switch error {
+                case .mediaFailure, .unsupportedAnimatedImage:
+                    // 首帧载入成功不保证后续所有帧可解；坏替换帧只停掉对应实例。
+                    scene.optionalMediaFailures.record(error, for: instance.id)
+                    try await optionalImageFallback(for: instance, source: source, matrix: matrix, opacity: opacity)
+                    return
+                default: throw error
+                }
+            }
+            // 媒体owner暂停点后必须重新检查撤销，旧帧不得发布到新编辑版本。
+            try Task.checkCancellation()
+        } else { selected = input }
+        let identity = selected.storage.identity
         // 替换素材的原始逻辑框裁剪属于效果输入；直采路径不能把它错误放在平铺结果之后。
         guard motionTile == nil || clip == nil else {
             throw PAGError.unsupportedFeature("motionTileReplacementClip")
@@ -362,18 +465,84 @@ private struct FramePlanBuilder {
         guard cornerPin == nil || clip == nil else {
             throw PAGError.unsupportedFeature("cornerPinReplacementClip")
         }
+        if motionBlur != nil {
+            // 当前直采融合只与未裁边、未缩放的完整逻辑图等价；替换输入需独立映射合同。
+            guard motionTile != nil, bulge == nil, cornerPin == nil, clip == nil,
+                  source.logicalSize == input.size, source.scaleFactor == 1,
+                  source.anchor.x == 0, source.anchor.y == 0 else {
+                throw PAGError.unsupportedFeature("motionBlurImagePlacement")
+            }
+        }
         let tile = try motionTile.map { try FrameMotionTile($0, placement: local, pixelSize: input.size) }
         let cornerFrame = try cornerPin.map { try FrameCornerPin($0, placement: local) }
         let bulgeFrame = try bulge.map { try FrameBulge($0, placement: local,
             pixelSize: input.size, cornerPin: cornerFrame) }
         if images[identity] == nil {
             try budget.reserve(stride: 256)
-            images[identity] = input
+            images[identity] = selected
         }
         try append(.image(FrameImage(layerID: instance.id, resourceID: identity, pixelSize: input.size,
                                       matrix: pixelMatrix, clip: clip,
                                       opacity: opacity, contentTime: sampleTime,
-                                      motionTile: tile, bulge: bulgeFrame, cornerPin: cornerFrame)))
+                                      motionTile: tile, motionBlur: motionBlur,
+                                      bulge: bulgeFrame, cornerPin: cornerFrame)))
+    }
+
+    /// 已选择替换但没有有效帧时使用占位；无占位保持透明，不恢复原始图。
+    private mutating func optionalImageFallback(for instance: LayerInstance, source: SourceImage,
+                                                matrix: SceneAffine, opacity: Double) async throws {
+        if composition.edits.placeholders[instance.id] != nil {
+            try await placeholder(for: instance, source: source, matrix: matrix, opacity: opacity)
+        }
+    }
+
+    /// 可选替换素材尚无有效帧时画占位；占位按自身尺寸布局，不继承失败素材纹理尺寸。
+    private mutating func placeholder(for instance: LayerInstance, source: SourceImage,
+                                      matrix: SceneAffine, opacity: Double) async throws {
+        guard let input = composition.edits.placeholders[instance.id],
+              let clock = scene.placeholderClock else {
+            throw SceneValidator.invalid("missingPlaceholder")
+        }
+        let elapsed = clock.elapsed(for: instance.id, at: auxiliaryTime)
+        let selected: PAGImage
+        if input.animation != nil {
+            guard let owner = scene.animatedImages else {
+                throw SceneValidator.invalid("missingAnimatedImageOwner")
+            }
+            selected = try await owner.frame(for: input, at: elapsed)
+        } else { selected = input }
+        try Task.checkCancellation()
+        let reference = SourceLayerReference(composition: instance.compositionIndex, layer: instance.layerIndex)
+        let layer = composition.storage.compositions[reference.composition].layers[reference.layer]
+        let mode = layer.imageFillRule?.scaleMode ?? composition.storage.catalog.imageScaleMode(for: reference)
+        let placement = try ImagePlacement.replacement(input, source: source, mode: mode)
+        let pixelMatrix = try placement.following(matrix)
+        guard try pixelMatrix.hasArea() else { return }
+        let identity = selected.storage.identity
+        if images[identity] == nil {
+            try budget.reserve(stride: 256)
+            images[identity] = selected
+        }
+        try append(.image(FrameImage(layerID: instance.id, resourceID: identity,
+            pixelSize: input.size, matrix: pixelMatrix,
+            clip: FrameClip(size: source.logicalSize, matrix: matrix),
+            opacity: opacity, contentTime: elapsed)))
+        placeholderIDs.append(instance.id)
+    }
+
+    /// 图像与预合成共用上游相邻内容帧矩阵；严格相等的滤镜在计划阶段直接跳过。
+    private func sampleMotionBlur(layer: SourceLayer, instance: LayerInstance,
+                                  contentFrame: Int64, current: SceneAffine) throws -> MotionBlurSampling? {
+        guard layer.motionBlur else { return nil }
+        let storage = composition.storage
+        let source = storage.compositions[instance.compositionIndex]
+        // 首内容帧以前一帧等于自身；其它帧的控制父链也必须在前一内容帧重新求值。
+        let previousFrame = layer.startFrame + max(contentFrame - 1, 0)
+        var previousSampler = LayerTransformSampler(source: source,
+            topology: storage.topologies[instance.compositionIndex], frame: previousFrame)
+        let previous = try previousSampler.transform(for: instance.layerIndex)
+        let sampled = try MotionBlurSampling(previous: previous.matrix, current: current)
+        return sampled.shouldSkip ? nil : sampled
     }
 
     /// 静态直接引用，动态按源合成帧取缓存；内部组逐draw继承alpha，与外层图层边界分开。
@@ -430,7 +599,7 @@ private struct FramePlanBuilder {
         if opacity != 1 { try append(.endOpacityGroup) }
     }
 
-    /// 引用已准备的文字轮次；可选Picture只包内容，回退时每次实际glyph绘制继承图层alpha。
+    /// 引用已准备的文字轮次；附加溢出策略裁剪或滚动双副本，普通文字保留可选Picture。
     private mutating func text(instance: LayerInstance, frame: Int64,
                                matrix: SceneAffine, opacity: Double,
                                compositionSize: PAGSize, compositionMatrix: SceneAffine,
@@ -446,7 +615,9 @@ private struct FramePlanBuilder {
             else {
                 var value = base
                 if !layer.textAnimators.isEmpty {
-                    value = try TextAnimatorPreparation.prepare(base: value, source: source,
+                    let animatorSource = scene.marqueeWidths[reference] == nil ? source :
+                        MarqueeTextPreparation.pointSource(source)
+                    value = try TextAnimatorPreparation.prepare(base: value, source: animatorSource,
                         animators: layer.textAnimators, at: frame, budget: &budget)
                 }
                 if let option = layer.textPath {
@@ -474,40 +645,70 @@ private struct FramePlanBuilder {
             try budget.reserve(stride: 256)
             texts[prepared.identity] = prepared
         }
+        let slot = composition.storage.catalog.slots[reference]
+        let overflow = slot.flatMap { composition.edits.textOverflows[$0] }
+        var placements = [matrix]
+        if let width = scene.marqueeWidths[reference], case .marquee(let options)? = overflow,
+           case .text(let source) = layer.content {
+            let elapsed = scene.marqueeClock?.elapsed(for: instance.id, at: auxiliaryTime) ?? .zero
+            let offset = try MarqueeMotion.offset(width: width, options: options, elapsed: elapsed)
+            // 点文本资源以原点排版；滚动的两个副本先回到源框基线，再由原图层矩阵映射。
+            placements = try [-offset, width + options.gap - offset].map { x in
+                try SceneAffine.translation(x: source.boxPosition.x + x,
+                    y: source.firstBaseline).following(matrix)
+            }
+            if isPlaying { marqueeIDs.append(instance.id) }
+        }
+        if overflow != nil, case .text(let source) = layer.content {
+            let clipMatrix = try SceneAffine.translation(x: source.boxPosition.x,
+                y: source.boxPosition.y).following(matrix)
+            let clip = FrameClip(size: try PAGSize(width: source.boxSize.x, height: source.boxSize.y),
+                                 matrix: clipMatrix)
+            // perDraw裁剪直接跟随各glyph写入drawable，不为跑马灯引入整帧附件。
+            try append(.beginGroup(FrameGroup(layerID: instance.id, frame: frame,
+                                              clip: clip, opacity: 1)))
+        }
         if let bulge {
             // 上游先把背景和全部字形合成，再以父合成尺寸而非字形AABB施加Bulge。
-            let background: FrameShape?
-            if let backgroundID, case .text(let source) = layer.content {
-                background = FrameShape(layerID: instance.id, geometryID: backgroundID, matrix: matrix,
-                    material: .solid(source.backgroundColor), opacity: Double(source.backgroundAlpha) / 255)
-            } else { background = nil }
-            let passes = prepared.passes.indices.map {
-                FrameText(layerID: instance.id, resourceID: prepared.identity, passIndex: $0, matrix: matrix)
-            }
             let effect = try FrameBulge(bulge, placement: .identity, pixelSize: compositionSize)
-            try append(.textBulge(FrameTextBulge(layerID: instance.id, frame: frame,
-                compositionSize: compositionSize, compositionMatrix: compositionMatrix,
-                bulge: effect, opacity: opacity, background: background, passes: passes)))
+            for placement in placements {
+                let background: FrameShape?
+                if let backgroundID, case .text(let source) = layer.content {
+                    background = FrameShape(layerID: instance.id, geometryID: backgroundID, matrix: placement,
+                        material: .solid(source.backgroundColor), opacity: Double(source.backgroundAlpha) / 255)
+                } else { background = nil }
+                let passes = prepared.passes.indices.map {
+                    FrameText(layerID: instance.id, resourceID: prepared.identity, passIndex: $0, matrix: placement)
+                }
+                try append(.textBulge(FrameTextBulge(layerID: instance.id, frame: frame,
+                    compositionSize: compositionSize, compositionMatrix: compositionMatrix,
+                    bulge: effect, opacity: opacity, background: background, passes: passes)))
+            }
+            if overflow != nil { try append(.endGroup) }
             return
         }
         // 每轮可能含多个glyph；快照缺席时先组合整层再乘alpha会改变重叠区。
         if opacity != 1 { try append(.beginOpacityGroup(FrameOpacityGroup(layerID: instance.id, opacity: opacity, application: .perDraw))) }
-        let eligible = scene.pictureCandidates.layerContent[reference.composition][reference.layer]
+        let eligible = overflow == nil && scene.pictureCandidates.layerContent[reference.composition][reference.layer]
         if eligible {
             try append(.beginPicture(FramePicture(document: composition.storage.identity, source: reference,
                 matrix: matrix, content: .text(resourceID: prepared.identity, layerID: instance.id))))
         }
-        if let backgroundID, case .text(let source) = layer.content {
-            // 背景与字形使用同一图层矩阵，但必须先于全部fill/stroke轮次绘制。
-            try append(.shape(FrameShape(layerID: instance.id, geometryID: backgroundID, matrix: matrix,
-                material: .solid(source.backgroundColor), opacity: Double(source.backgroundAlpha) / 255)))
-        }
-        for index in prepared.passes.indices {
-            try Task.checkCancellation()
-            try append(.text(FrameText(layerID: instance.id, resourceID: prepared.identity, passIndex: index, matrix: matrix)))
+        for placement in placements {
+            if let backgroundID, case .text(let source) = layer.content {
+                // 背景与同份字形一起移动；第二副本只在框内露出且不会覆盖首副本。
+                try append(.shape(FrameShape(layerID: instance.id, geometryID: backgroundID, matrix: placement,
+                    material: .solid(source.backgroundColor), opacity: Double(source.backgroundAlpha) / 255)))
+            }
+            for index in prepared.passes.indices {
+                try Task.checkCancellation()
+                try append(.text(FrameText(layerID: instance.id, resourceID: prepared.identity,
+                                           passIndex: index, matrix: placement)))
+            }
         }
         if eligible { try append(.endPicture) }
         if opacity != 1 { try append(.endOpacityGroup) }
+        if overflow != nil { try append(.endGroup) }
     }
 
     /// 单条命令也先计量；不能等数组增长完成后才发现预算不足。

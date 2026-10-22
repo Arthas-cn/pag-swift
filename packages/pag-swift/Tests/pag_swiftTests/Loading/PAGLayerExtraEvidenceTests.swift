@@ -4,6 +4,26 @@ import Testing
 
 /// 五份tag63真实文件的名称与运动模糊位按上游LayerAttributesExtra字段独立核对。
 struct PAGLayerExtraEvidenceTests {
+    /// 2J的动态MotionBlur只包预合成内容，MT2的同一开关则在图像MotionTile之后生效。
+    @Test func remainingMotionBlurLayersHaveDistinctInputChains() throws {
+        var twoJ = ShapeAnimationInspection()
+        try twoJ.inspect(PAGFixtures.data(named: "2J.pag"))
+        let precomposition = try #require(twoJ.layerExtraReaders.first {
+            $0.compositionID == 556 && $0.layerID == 568
+        })
+        #expect(precomposition.kind == 6)
+        #expect(twoJ.effectReaders.filter { $0.compositionID == 556 && $0.layerID == 568 }.isEmpty)
+        var mt2 = ShapeAnimationInspection()
+        try mt2.inspect(PAGFixtures.data(named: "MT2.pag"))
+        let image = try #require(mt2.layerExtraReaders.first {
+            $0.compositionID == 1131354197 && $0.layerID == 1131354215
+        })
+        #expect(image.kind == 5)
+        #expect(mt2.effectReaders.filter {
+            $0.compositionID == 1131354197 && $0.layerID == 1131354215
+        }.map(\.code) == [56])
+    }
+
     /// 有界子流均完整消费；是否启用运动模糊由位标记证明，不由标签存在猜测。
     @Test(arguments: ["2J.pag", "MT2.pag", "TextAnimatorX7.pag",
                       "nodegroup_clip1.pag", "nodegroup_clip2.pag"])
@@ -49,11 +69,22 @@ struct PAGLayerExtraEvidenceTests {
         #expect(layer.name == "I SEE IT IN YOUR CLOSED EYES TURNING IN")
     }
 
-    /// scale轨道变化会改变相邻帧矩阵；未实现37采样滤镜前不能忽略tag63。
-    @Test(arguments: ["2J.pag"])
-    func animatedMotionBlurStillFailsExplicitly(_ name: String) async throws {
-        await #expect(throws: PAGError.unsupportedFeature("motionBlur")) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: name))
+    /// 两份动态层正式载入后，其效果输入仍分别为预合成紧界与完整图像平铺域。
+    @Test func remainingMotionBlurDecoderBoundary() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "2J.pag"))
+        let layer = try #require(file.storage.compositions.flatMap(\.layers).first { $0.id == 568 })
+        #expect(layer.motionBlur)
+        let tiled = try await PAGLoader().load(data: PAGFixtures.data(named: "MT2.pag"))
+        let imageLayer = try #require(tiled.storage.compositions.flatMap(\.layers).first { $0.id == 1131354215 })
+        #expect(imageLayer.motionBlur)
+        guard case .image(let imageID) = imageLayer.content else {
+            Issue.record("MT2动态层应为图像")
+            return
         }
+        let source = try #require(tiled.storage.resources.images[imageID])
+        let expected = try PAGSize(width: 858, height: 1250)
+        #expect(source.logicalSize == expected)
+        #expect(source.image.size == source.logicalSize)
+        #expect(source.scaleFactor == 1 && source.anchor.x == 0 && source.anchor.y == 0)
     }
 }

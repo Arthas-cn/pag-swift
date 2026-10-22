@@ -4,11 +4,12 @@ import Testing
 
 /// 真实完整场景解码与破坏性变体；不能用仅通过容器检查的结果冒充成功。
 struct PAGSceneDecoderTests {
-    /// 真实资源只有完整闭包才能成功，其余必须明确 unsupported，不能输出损坏或部分场景。
+    /// 每份真实资源须完整解码或明确unsupported；全部已支持时允许计数为零。
     @Test func realFixtureSupportIsExplicit() async throws {
         var decodedNames: [String] = []
         var unsupportedCount = 0
-        for url in try PAGFixtures.allPAGURLs() {
+        let urls = try PAGFixtures.allPAGURLs()
+        for url in urls {
             do {
                 let file = try await PAGSceneDecoder.decode(Data(contentsOf: url))
                 #expect(file.composition.duration.microseconds > 0)
@@ -22,7 +23,7 @@ struct PAGSceneDecoderTests {
             }
         }
         #expect(decodedNames.contains("red.pag"))
-        #expect(unsupportedCount > 0)
+        #expect(decodedNames.count + unsupportedCount == urls.count)
     }
 
     /// red 的完整只读树、时间、尺寸与默认形状填充应符合独立上游证据。

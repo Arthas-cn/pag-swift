@@ -52,6 +52,19 @@ struct FrameTrackMatte: Sendable {
     let ownerID: PAGLayerID
     /// 当前模式决定alpha/luma取样及反向规则，不取源层自身属性。
     let mode: SourceTrackMatteType
+    /// 只有源图层实际要求非默认图层混合时，遮罩完成后才应用；普通遮罩为Normal。
+    let ownerBlendMode: SourceLayerBlendMode
+    /// 非默认图层混合的拥有者整体alpha，必须在遮罩结果上只乘一次。
+    let ownerOpacity: Double
+
+    /// 默认遮罩仍沿用原普通SrcOver；显式混合由真实拥有者图层提供。
+    init(ownerID: PAGLayerID, mode: SourceTrackMatteType,
+         ownerBlendMode: SourceLayerBlendMode = .normal, ownerOpacity: Double = 1) {
+        self.ownerID = ownerID
+        self.mode = mode
+        self.ownerBlendMode = ownerBlendMode
+        self.ownerOpacity = ownerOpacity
+    }
 }
 
 /// 一层静态下方投影的来源与整体透明度；内容必须先独立组合，再按样式顺序绘回。
@@ -66,6 +79,40 @@ struct FrameDropShadow: Sendable {
     let styles: [SourceDropShadow]
     /// 图层自身alpha，在投影与原内容组合后只消费一次。
     let opacity: Double
+}
+
+/// 整层Shape先合成后覆盖的Angle渐变；只承载已证实的白黑单样式子范围。
+struct FrameGradientOverlay: Sendable {
+    /// 实际图层实例，供局部样式工作与源Shape边界对应。
+    let layerID: PAGLayerID
+    /// 当前所属合成帧采样的角度，按上游360-angle进入样式矩阵。
+    let angle: Double
+    /// 整层变换透明度，在渐变与原内容混合完成后只应用一次。
+    let opacity: Double
+}
+
+/// Shape整层在自身坐标执行FastBlur，随后才与已有颜色作HardLight。
+struct FrameShapeBlurBlend: Sendable {
+    /// 实际图层实例，防止局部命令范围串到相邻Shape。
+    let layerID: PAGLayerID
+    /// Shape局部坐标到最终显示像素，模糊前不烘入旋转或非等比缩放。
+    let matrix: SceneAffine
+    /// 当前帧已采样的tag60参数；零值也保持整层混合边界。
+    let blur: SampledFastBlur
+    /// 未遮罩时由当前结果draw消费；被轨道遮罩拥有时固定1，整体alpha移到遮罩后。
+    let opacity: Double
+    /// Track Matte拥有者先Normal写其内容表面；未遮罩图层直接以HardLight写背景。
+    let blendMode: SourceLayerBlendMode
+
+    /// 明确区分内部滤镜结果与外层图层混合，避免轨道遮罩提前读取错误背景。
+    init(layerID: PAGLayerID, matrix: SceneAffine, blur: SampledFastBlur,
+         opacity: Double, blendMode: SourceLayerBlendMode = .hardLight) {
+        self.layerID = layerID
+        self.matrix = matrix
+        self.blur = blur
+        self.opacity = opacity
+        self.blendMode = blendMode
+    }
 }
 
 /// Text层Bulge的完整合成输入引用；父合成尺寸定义滤镜域，字形只借紧致内容附件。
@@ -108,6 +155,12 @@ struct FrameGroup: Sendable {
     let motionTile: FrameMotionTile?
     /// tag63当前帧相对上一内容帧的矩阵差；相等已在计划阶段跳过。
     let motionBlur: MotionBlurSampling?
+    /// 整组内容合成后才使用的tag61单效果数值；nil表示没有Glow。
+    let glow: SampledGlow?
+    /// tag59在前置MotionTile与Glow之后的当前帧值；零height跳过时为nil。
+    let tileGlowBulge: SampledBulge?
+    /// Glow后顺序执行的tag60数值；零模糊在本帧跳过GPU阶段。
+    let fastBlur: SampledFastBlur?
     /// 无快照时逐次绘制继承alpha，只有明确已组合内容才能选择composite。
     let application: FrameOpacityApplication
 
@@ -115,7 +168,9 @@ struct FrameGroup: Sendable {
     init(layerID: PAGLayerID?, frame: Int64, clip: FrameClip, opacity: Double,
          application: FrameOpacityApplication = .perDraw, definitionIndex: Int? = nil,
          blendMode: SourceLayerBlendMode = .normal, levelsGreenOnly: Bool = false,
-         motionTile: FrameMotionTile? = nil, motionBlur: MotionBlurSampling? = nil) {
+         motionTile: FrameMotionTile? = nil, motionBlur: MotionBlurSampling? = nil,
+         glow: SampledGlow? = nil, fastBlur: SampledFastBlur? = nil,
+         tileGlowBulge: SampledBulge? = nil) {
         self.layerID = layerID
         self.definitionIndex = definitionIndex
         self.frame = frame
@@ -125,6 +180,9 @@ struct FrameGroup: Sendable {
         self.levelsGreenOnly = levelsGreenOnly
         self.motionTile = motionTile
         self.motionBlur = motionBlur
+        self.glow = glow
+        self.fastBlur = fastBlur
+        self.tileGlowBulge = tileGlowBulge
         self.application = application
     }
 }
@@ -175,6 +233,8 @@ struct FrameImage: Sendable {
     let contentTime: PAGTime
     /// tag56效果的输入归一化中心与逐帧参数；nil走普通图片采样。
     let motionTile: FrameMotionTile?
+    /// 图像平铺之后相对上一内容帧的矩阵差；静态相等或未启用时为nil。
+    let motionBlur: MotionBlurSampling?
     /// tag59图像凸出效果的归一化几何；nil表示无可见凸出。
     let bulge: FrameBulge?
     /// tag58四角逆投影；nil表示没有图像透视输出。
@@ -183,7 +243,8 @@ struct FrameImage: Sendable {
     /// 保留图像输入身份与可选效果，默认调用仍不改变普通图片语义。
     init(layerID: PAGLayerID?, resourceID: DocumentIdentity, pixelSize: PAGSize,
          matrix: SceneAffine, clip: FrameClip?, opacity: Double, contentTime: PAGTime,
-         motionTile: FrameMotionTile? = nil, bulge: FrameBulge? = nil,
+         motionTile: FrameMotionTile? = nil, motionBlur: MotionBlurSampling? = nil,
+         bulge: FrameBulge? = nil,
          cornerPin: FrameCornerPin? = nil) {
         self.layerID = layerID
         self.resourceID = resourceID
@@ -193,6 +254,7 @@ struct FrameImage: Sendable {
         self.opacity = opacity
         self.contentTime = contentTime
         self.motionTile = motionTile
+        self.motionBlur = motionBlur
         self.bulge = bulge
         self.cornerPin = cornerPin
     }
@@ -311,7 +373,7 @@ struct FrameMotionTile: Sendable {
     }
 }
 
-/// 内嵌视频在当前时刻的只读绘制命令；纯值计划不持有CoreVideo或Metal对象。
+/// 内嵌或外部视频在当前时刻的只读绘制命令；纯值计划不持有CoreVideo或Metal对象。
 struct FrameVideo: Sendable {
     /// 来源预合成实例；根video合成没有人工图层身份，为nil。
     let layerID: PAGLayerID?
@@ -323,6 +385,19 @@ struct FrameVideo: Sendable {
     let matrix: SceneAffine
     /// 当前图元透明度；合成整体alpha仍留在beginGroup中。
     let opacity: Double
+    /// 外部替换素材按原图层逻辑边界裁剪；内嵌视频无需附加裁剪。
+    let clip: FrameClip?
+
+    /// 保留既有内嵌视频参数，并为外部替换额外接受局部图层裁剪。
+    init(layerID: PAGLayerID?, resourceID: VideoFrameID, pixelSize: PAGSize,
+         matrix: SceneAffine, opacity: Double, clip: FrameClip? = nil) {
+        self.layerID = layerID
+        self.resourceID = resourceID
+        self.pixelSize = pixelSize
+        self.matrix = matrix
+        self.opacity = opacity
+        self.clip = clip
+    }
 }
 
 /// 无额外裁剪的透明度如何被消费；普通Shape组与已组合内容不能混为一种附件语义。
@@ -425,6 +500,14 @@ enum FrameCommand: Sendable {
     case beginDropShadow(FrameDropShadow)
     /// 结束当前层原始内容，并在同一覆盖位置绘制下方投影与源图。
     case endDropShadow
+    /// 开始整层GradientOverlay的原始Shape内容，样式不逐图元施加。
+    case beginGradientOverlay(FrameGradientOverlay)
+    /// 结束原始Shape内容并把局部样式结果绘回当前显示作用域。
+    case endGradientOverlay
+    /// 开始Shape完整内容；局部FastBlur必须先于最终HardLight。
+    case beginShapeBlurBlend(FrameShapeBlurBlend)
+    /// 结束Shape内容并以一次图层混合写当前显示附件。
+    case endShapeBlurBlend
     /// 直接绘制已求值的纯色矩形。
     case solid(FrameSolid)
     /// 按内容身份引用不可变图像输入，包括当前时刻已重建的 bitmap 素材帧。
@@ -463,14 +546,21 @@ struct PreparedFrame: Sendable {
     let texts: [TextResourceID: PreparedTextLayer]
     /// 经过局部同步桥保活的视频输入；只允许RenderOwner消费一次，不把裸帧放入FramePlan。
     let videos: [VideoFrameID: VideoFrameTransfer]
+    /// 实际选中的占位实例；仅在有效GPU完成后由播放许可建立辅助时间起点。
+    let placeholderIDs: [PAGLayerID]
+    /// 本次正在播放且确实绘制了滚动文字的实例；有效GPU完成后才建立滚动起点。
+    let marqueeIDs: [PAGLayerID]
 
     /// 组合完整计划与按身份去重的输入；不含视频的计划不分配媒体槽。
     init(plan: FramePlan, images: [DocumentIdentity: PAGImage], shapes: [ShapeGeometryID: ShapeGeometry],
-         texts: [TextResourceID: PreparedTextLayer], videos: [VideoFrameID: VideoFrameTransfer] = [:]) {
+         texts: [TextResourceID: PreparedTextLayer], videos: [VideoFrameID: VideoFrameTransfer] = [:],
+         placeholderIDs: [PAGLayerID] = [], marqueeIDs: [PAGLayerID] = []) {
         self.plan = plan
         self.images = images
         self.shapes = shapes
         self.texts = texts
         self.videos = videos
+        self.placeholderIDs = placeholderIDs
+        self.marqueeIDs = marqueeIDs
     }
 }

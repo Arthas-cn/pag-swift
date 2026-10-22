@@ -7,12 +7,16 @@ import Testing
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["PAG_RESOURCE_AUDIT"] == "1",
                 "设置PAG_RESOURCE_AUDIT=1重新分类真实资源"), .timeLimit(.minutes(5)))
 struct PAGResourcePlaybackAuditTests {
-    /// 逐份报告公开载入及首/中/末共同Metal准备；未知能力可明确失败，其他错误必须记录为问题。
+    /// 逐份报告公开载入及首/中/末Metal准备；P9可追加Demo小宿主缩放复核。
     @Test func classifiesEveryCompleteFile() async throws {
         let root = try PAGFixtures.rootURL()
         let owner = ResourceAuditMetalOwner(device: try #require(MTLCreateSystemDefaultDevice()))
-        var supported = 0, unsupported = 0
+        let smallHost = ProcessInfo.processInfo.environment["PAG_RESOURCE_AUDIT_SMALL_HOST"] == "1"
+        let smallHostSize = try PAGSize(width: 688, height: 220)
+        let smallHostPixels = try PAGSize(width: 1_376, height: 440)
+        var supported = 0, unsupported = 0, total = 0
         for url in try PAGFixtures.allPAGURLs() {
+            total += 1
             let name = String(url.path.dropFirst(root.path.count + 1))
             let data = try Data(contentsOf: url)
             let inspection = try await PAGContainerInspector.inspect(data)
@@ -31,6 +35,15 @@ struct PAGResourcePlaybackAuditTests {
                         targetSize: scene.composition.size, scale: 1, mode: .none)
                     phase = "metal"
                     try await owner.prepare(frame, size: scene.composition.size)
+                    if smallHost {
+                        // 正式Demo的短宽宿主会出现分数显示原点，不能只用源尺寸整像素审计。
+                        phase = "smallHostPlan"
+                        let fitted = try await FramePlanner.prepare(scene,
+                            at: PAGTime(microseconds: microseconds),
+                            targetSize: smallHostSize, scale: 2, mode: .aspectFit)
+                        phase = "smallHostMetal"
+                        try await owner.prepare(fitted, size: smallHostPixels)
+                    }
                 }
                 supported += 1
                 report(name: name, status: "passed", phase: "metal", reason: "", ids: ids)
@@ -41,7 +54,7 @@ struct PAGResourcePlaybackAuditTests {
             }
         }
         print("PAG_AUDIT_COUNTS passed=\(supported) unsupported=\(unsupported)")
-        #expect(supported > 0 && unsupported > 0)
+        #expect(total > 0 && supported + unsupported == total)
     }
 
     /// JSON单行便于稳定重建支持矩阵；字段明确区分解码与绘制准备的失败阶段。

@@ -218,6 +218,25 @@ struct PlaybackTimelineTests {
         #expect(timeline.position.microseconds == 49)
     }
 
+    /// 辅助时间跨根循环累计，暂停/隐藏/seek冻结，有限末帧不把越界tick算成可见播放。
+    @Test func auxiliaryTimeTracksOnlyActivePlayback() throws {
+        var timeline = try playing(duration: 100, repeats: 2)
+        timeline.advance(to: 130)
+        #expect(timeline.position.microseconds == 30 && timeline.activeElapsed == 130)
+        timeline.pause(at: 140)
+        #expect(timeline.activeElapsed == 140)
+        timeline.setTarget(.unavailable, at: 1_000)
+        timeline.setTarget(.available, at: 2_000)
+        try timeline.seek(to: PAGTime(microseconds: 10), at: 2_000)
+        #expect(timeline.activeElapsed == 140)
+        try timeline.play(at: 2_000)
+        timeline.advance(to: 2_500)
+        #expect(timeline.activeElapsed == 230)
+        #expect(timeline.awaitsFinalFrame)
+        try timeline.rewind()
+        #expect(timeline.activeElapsed == 0)
+    }
+
     /// 建立真实时间状态机的可用目标，不注入任何 GPU 成功结果。
     private func playing(duration: Int64, repeats: Int = 1) throws -> PlaybackTimeline {
         var timeline = PlaybackTimeline()

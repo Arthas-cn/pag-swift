@@ -86,7 +86,8 @@ struct MetalVectorPictureDescriptor {
             case .beginPicture, .endPicture, .beginVectorPicture, .endVectorPicture:
                 throw PAGError.renderingFailure("metalVectorUnexpandedPicture")
             case .beginMask, .endMask, .beginTrackMatte, .endTrackMatteSource, .endTrackMatte,
-                 .beginDropShadow, .endDropShadow:
+                 .beginDropShadow, .endDropShadow, .beginGradientOverlay, .endGradientOverlay,
+                 .beginShapeBlurBlend, .endShapeBlurBlend:
                 // 双输入效果不能被父Vector局部纹理的单图元范围测量吞掉。
                 throw PAGError.renderingFailure("metalVectorMask")
             case .image, .video:
@@ -178,7 +179,8 @@ struct MetalVectorPictureDescriptor {
                                    passIndex: text.passIndex, matrix: matrix))
             case .beginPicture, .endPicture, .beginVectorPicture, .endVectorPicture, .image, .video, .textBulge,
              .beginMask, .endMask, .beginTrackMatte, .endTrackMatteSource, .endTrackMatte,
-             .beginDropShadow, .endDropShadow:
+             .beginDropShadow, .endDropShadow, .beginGradientOverlay, .endGradientOverlay,
+             .beginShapeBlurBlend, .endShapeBlurBlend:
             throw PAGError.renderingFailure("metalVectorUnexpandedPicture")
         }
     }

@@ -22,9 +22,9 @@ struct MetalMotionBlurUniforms {
     }
 }
 
-/// 与基础MSL拼接的Screen+Levels+MotionTile+MotionBlur片元；根pass直接写drawable。
+/// 与基础MSL拼接的37样本MotionBlur片元；预合成或图像效果结果均直接写最终目标。
 enum MetalMotionBlurShaderSource {
-    /// 37次取样先读取平铺效果结果，再保留绿色，最后交固定Screen系数。
+    /// 按输入材质分别读取紧致内容、图像平铺或Screen绿通道效果结果。
     static let source = """
     struct PAGMotionBlurUniforms {
         float4 previousHorizontal;
@@ -33,6 +33,83 @@ enum MetalMotionBlurShaderSource {
         float4 currentVertical;
         float4 parameters;
     };
+    /// 无前置Effects的预合成直接从紧致内容附件读取；UV仍属于完整可见内容域。
+    inline float4 pagMappedMotionBlurSample(float2 uv, constant PAGTextBulgeMap &map,
+                                             texture2d<float> image) {
+        float2 localUV = float2(dot(map.horizontal.xyz, float3(uv, 1.0f)),
+                                dot(map.vertical.xyz, float3(uv, 1.0f)));
+        constexpr sampler inputSampler(coord::normalized, address::clamp_to_zero, filter::linear);
+        return image.sample(inputSampler, localUV);
+    }
+    fragment float4 pagMappedMotionBlurImage(PAGRaster in [[stage_in]],
+                                              constant PAGUniforms &uniforms [[buffer(1)]],
+                                              const device float4 *clips [[buffer(2)]],
+                                              const device PAGCoverageNode *nodes [[buffer(3)]],
+                                              const device uint *triangles [[buffer(4)]],
+                                              const device PAGCoverageVertex *vertices [[buffer(5)]],
+                                              constant PAGTextBulgeMap &map [[buffer(11)]],
+                                              constant PAGMotionBlurUniforms &blur [[buffer(16)]],
+                                              texture2d<float> image [[texture(0)]]) {
+        float2 pixel = in.position.xy + uniforms.targetOffset.xy;
+        float area = pagCoverage(pixel, uniforms, clips, nodes, triangles, vertices);
+        float2 relative = pixel - float2(uniforms.horizontalPixels.z, uniforms.verticalPixels.z);
+        float2 outputUV = float2(dot(uniforms.inverse.xy, relative), dot(uniforms.inverse.zw, relative));
+        float2 uv = outputUV * 1.2f - 0.1f;
+        float3 point = float3(uv, 1.0f);
+        float2 previous = float2(dot(blur.previousHorizontal.xyz, point),
+                                 dot(blur.previousVertical.xyz, point));
+        float2 current = float2(dot(blur.currentHorizontal.xyz, point),
+                                dot(blur.currentVertical.xyz, point));
+        float2 velocity = current - previous;
+        float distance = length(velocity);
+        velocity *= min(distance, blur.parameters.y) / distance;
+        float4 result = pagMappedMotionBlurSample(clamp(uv, 0.0f, 1.0f), map, image);
+        float outside = 0.0f;
+        for (int i = 1; i < 37; ++i) {
+            float2 target = uv + velocity * (float(i) / 36.0f - blur.parameters.x);
+            if (all(target >= float2(0.0f)) && all(target < float2(1.0f))) {
+                result += pagMappedMotionBlurSample(target, map, image);
+            } else {
+                outside += 1.0f;
+            }
+        }
+        return (outside < 36.0f ? result / 37.0f : float4(0.0f)) * uniforms.color * area;
+    }
+    /// 完整图像平铺先于37次模糊采样；同一片元直接写目标，无整帧效果副本。
+    fragment float4 pagMotionTileBlurImage(PAGRaster in [[stage_in]],
+                                            constant PAGUniforms &uniforms [[buffer(1)]],
+                                            const device float4 *clips [[buffer(2)]],
+                                            const device PAGCoverageNode *nodes [[buffer(3)]],
+                                            const device uint *triangles [[buffer(4)]],
+                                            const device PAGCoverageVertex *vertices [[buffer(5)]],
+                                            constant PAGMotionTileUniforms &tile [[buffer(6)]],
+                                            constant PAGMotionBlurUniforms &blur [[buffer(16)]],
+                                            texture2d<float> image [[texture(0)]]) {
+        float2 pixel = in.position.xy + uniforms.targetOffset.xy;
+        float area = pagCoverage(pixel, uniforms, clips, nodes, triangles, vertices);
+        float2 relative = pixel - float2(uniforms.horizontalPixels.z, uniforms.verticalPixels.z);
+        float2 outputUV = float2(dot(uniforms.inverse.xy, relative), dot(uniforms.inverse.zw, relative));
+        float2 uv = outputUV * 1.2f - 0.1f;
+        float3 point = float3(uv, 1.0f);
+        float2 previous = float2(dot(blur.previousHorizontal.xyz, point),
+                                 dot(blur.previousVertical.xyz, point));
+        float2 current = float2(dot(blur.currentHorizontal.xyz, point),
+                                dot(blur.currentVertical.xyz, point));
+        float2 velocity = current - previous;
+        float distance = length(velocity);
+        velocity *= min(distance, blur.parameters.y) / distance;
+        float4 result = pagMotionTileSample(clamp(uv, 0.0f, 1.0f), tile, image);
+        float outside = 0.0f;
+        for (int i = 1; i < 37; ++i) {
+            float2 target = uv + velocity * (float(i) / 36.0f - blur.parameters.x);
+            if (all(target >= float2(0.0f)) && all(target < float2(1.0f))) {
+                result += pagMotionTileSample(target, tile, image);
+            } else {
+                outside += 1.0f;
+            }
+        }
+        return (outside < 36.0f ? result / 37.0f : float4(0.0f)) * uniforms.color * area;
+    }
     /// 紧附件仅存有色区域；坐标仍从完整预合成平铺域映入。
     inline float4 pagMotionBlurTileSample(float2 uv, constant PAGMotionTileUniforms &tile,
                                            constant PAGTextBulgeMap &map, texture2d<float> image) {

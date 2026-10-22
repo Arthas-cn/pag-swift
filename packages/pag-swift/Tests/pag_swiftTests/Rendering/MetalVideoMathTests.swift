@@ -33,6 +33,25 @@ struct MetalVideoMathTests {
         try await VideoMathTestOwner(device: #require(MTLCreateSystemDefaultDevice())).verify(probes, expected: expected)
     }
 
+    /// 外部视频709有限范围色彩由同一生产片元公式选择，不能沿用PAG内嵌视频601。
+    @Test func external709ColorUsesBufferMatrix() async throws {
+        let video = MetalVideoUniforms(colorRegion: .one, alphaRegion: .zero, colorMatrix: .bt709)
+        var probes: [VideoMathProbe] = []
+        var expected: [SIMD4<Float>] = []
+        for (y, u, v) in [(81, 90, 240), (145, 54, 34), (41, 240, 110), (235, 128, 128)] {
+            let input = SIMD4(Float(y), Float(u), Float(v), 255) / 255
+            probes.append(VideoMathProbe(values: input, selection: .zero, video: video))
+            let luma = Double(input.x) - 16.0 / 255
+            let cb = Double(input.y) - 0.5, cr = Double(input.z) - 0.5
+            let channels = [1.164384 * luma + 1.792741 * cr,
+                            1.164384 * luma - 0.213249 * cb - 0.532909 * cr,
+                            1.164384 * luma + 2.112402 * cb]
+            let values = channels.map { Float(min(1, max(0, $0))) }
+            expected.append(SIMD4(values[0], values[1], values[2], 1))
+        }
+        try await VideoMathTestOwner(device: #require(MTLCreateSystemDefaultDevice())).verify(probes, expected: expected)
+    }
+
     /// 左右/上下alpha、奇数可见宽、单像素区域和两种原点，都先夹到半像素内侧再作完整平面映射。
     @Test func coordinatesPreserveRegionAndTextureOrigin() async throws {
         let layouts = [(720, 1080, 720, 0, 1440, 1080), (1280, 720, 0, 720, 1280, 1440),
@@ -59,7 +78,7 @@ struct MetalVideoMathTests {
     }
 }
 
-/// 数值内核的64字节输入，全部字段都是可发送标量，不包含纹理或像素缓冲。
+/// 数值内核的80字节输入，全部字段都是可发送标量，不包含纹理或像素缓冲。
 private struct VideoMathProbe: Sendable {
     /// 颜色测试为Y/U/V/alpha，坐标测试前两个值为可见区域UV。
     let values: SIMD4<Float>
@@ -93,7 +112,8 @@ private actor VideoMathTestOwner {
         kernel void verifyVideo(const device Probe *probes [[buffer(0)]], device float4 *output [[buffer(1)]],
                                  uint index [[thread_position_in_grid]]) {
             Probe probe = probes[index];
-            output[index] = probe.selection.x == 0 ? pagVideoColor(probe.values.xyz, probe.values.w, probe.selection.y != 0)
+            output[index] = probe.selection.x == 0 ? pagVideoColor(probe.values.xyz, probe.values.w,
+                probe.selection.y != 0, probe.video.matrixSelection.x)
                                                      : pagVideoCoordinates(probe.values.xy, probe.video);
         }
         """

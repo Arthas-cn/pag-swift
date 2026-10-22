@@ -2,10 +2,11 @@ import Foundation
 import Testing
 @testable import pag_swift
 
-/// 七份真实tag59载荷的字段及所属层调查；只作为后续Bulge合同证据，不开放正式标签。
+/// 图像、文本及clip1预合成层的真实tag59字段调查，独立于支持范围判断。
 struct PAGBulgeEvidenceTests {
     /// 八项flags与后续值必须在各自子流内完整消费，不能凭效果名称猜半径或pinning。
     @Test(arguments: ["Bulge-unpin-s.pag", "bulgetext.pag", "cornerpin-bulge.pag",
+                      "nodegroup_clip1.pag",
                       "text1.pag", "text2.pag", "text3.pag", "text4.pag"])
     func realBulgePayloads(_ name: String) throws {
         var inspection = ShapeAnimationInspection()

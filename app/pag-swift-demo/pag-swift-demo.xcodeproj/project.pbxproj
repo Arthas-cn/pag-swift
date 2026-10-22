@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C989FF82308A05D600DE657B /* SDWebImage in Frameworks */ = {isa = PBXBuildFile; productRef = C989FF81308A05D600DE657B /* SDWebImage */; };
+		C989FF84308A05D600DE657B /* SDWebImageMapKit in Frameworks */ = {isa = PBXBuildFile; productRef = C989FF83308A05D600DE657B /* SDWebImageMapKit */; };
+		C989FF87308A06A500DE657B /* SDWebImageWebPCoder in Frameworks */ = {isa = PBXBuildFile; productRef = C989FF86308A06A500DE657B /* SDWebImageWebPCoder */; };
 		C9976A93306A1507007747FB /* pag-swift in Frameworks */ = {isa = PBXBuildFile; productRef = C9976A92306A1507007747FB /* pag-swift */; };
 		D1A0F11E0000000000000002 /* resources in Copy PAG samples */ = {isa = PBXBuildFile; fileRef = D1A0F11E0000000000000001 /* resources */; };
 /* End PBXBuildFile section */
@@ -41,6 +44,9 @@
 		000000000000000130000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				C989FF82308A05D600DE657B /* SDWebImage in Frameworks */,
+				C989FF84308A05D600DE657B /* SDWebImageMapKit in Frameworks */,
+				C989FF87308A06A500DE657B /* SDWebImageWebPCoder in Frameworks */,
 				C9976A93306A1507007747FB /* pag-swift in Frameworks */,
 			);
 		};
@@ -93,6 +99,9 @@
 			name = "pag-swift-demo";
 			packageProductDependencies = (
 				C9976A92306A1507007747FB /* pag-swift */,
+				C989FF81308A05D600DE657B /* SDWebImage */,
+				C989FF83308A05D600DE657B /* SDWebImageMapKit */,
+				C989FF86308A06A500DE657B /* SDWebImageWebPCoder */,
 			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* pag-swift-demo.app */;
@@ -124,6 +133,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../../packages/pag-swift" */,
+				C989FF80308A05D600DE657B /* XCRemoteSwiftPackageReference "SDWebImage" */,
+				C989FF85308A06A500DE657B /* XCRemoteSwiftPackageReference "SDWebImageWebPCoder" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
@@ -394,7 +405,41 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		C989FF80308A05D600DE657B /* XCRemoteSwiftPackageReference "SDWebImage" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/SDWebImage/SDWebImage.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.21.7;
+			};
+		};
+		C989FF85308A06A500DE657B /* XCRemoteSwiftPackageReference "SDWebImageWebPCoder" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/SDWebImage/SDWebImageWebPCoder.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.15.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
+		C989FF81308A05D600DE657B /* SDWebImage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C989FF80308A05D600DE657B /* XCRemoteSwiftPackageReference "SDWebImage" */;
+			productName = SDWebImage;
+		};
+		C989FF83308A05D600DE657B /* SDWebImageMapKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C989FF80308A05D600DE657B /* XCRemoteSwiftPackageReference "SDWebImage" */;
+			productName = SDWebImageMapKit;
+		};
+		C989FF86308A06A500DE657B /* SDWebImageWebPCoder */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C989FF85308A06A500DE657B /* XCRemoteSwiftPackageReference "SDWebImageWebPCoder" */;
+			productName = SDWebImageWebPCoder;
+		};
 		C9976A92306A1507007747FB /* pag-swift */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../../packages/pag-swift" */;

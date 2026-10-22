@@ -70,13 +70,17 @@ actor RenderOwner: PlaybackSubmitting {
         }
         let batch: MetalFrameBatch?
         let representedTime: PAGTime?
+        let placeholderIDs: [PAGLayerID]
+        let marqueeIDs: [PAGLayerID]
         if let scene = request.scene {
             guard request.token.documentID == scene.composition.storage.identity else {
                 throw PAGError.renderingFailure("metalRequestDocument")
             }
             // 求值尚未持有显示租约，resize/detach可以立即撤销，返回后再复核两种代数。
             let frame = try await FramePlanner.prepare(scene, at: request.time, targetSize: geometry.size,
-                                                       scale: geometry.scale, mode: request.scaleMode)
+                                                       scale: geometry.scale, mode: request.scaleMode,
+                                                       isPlaying: request.isPlaying,
+                                                       auxiliaryTime: request.auxiliaryTime)
             try validate(request, target: target)
             let resources: MetalResources
             if let existing = self.resources { resources = existing }
@@ -98,6 +102,8 @@ actor RenderOwner: PlaybackSubmitting {
                                                        revision: request.token.compositionRevision,
                                                        pictures: resources.pictures)
             representedTime = frame.plan.time.representedTime
+            placeholderIDs = frame.placeholderIDs
+            marqueeIDs = frame.marqueeIDs
         } else {
             // 清屏不借用假场景，也不为零绘制编译管线或分配输入buffer。
             guard request.token.documentID == nil, request.time == .zero, !request.endsPlayback else {
@@ -108,6 +114,8 @@ actor RenderOwner: PlaybackSubmitting {
             pictureConfiguration = nil
             batch = nil
             representedTime = nil
+            placeholderIDs = []
+            marqueeIDs = []
         }
         // await只在真正GPU完成后返回；取消不能提前把仍使用中的组纹理放回池。
         defer {
@@ -170,12 +178,14 @@ actor RenderOwner: PlaybackSubmitting {
         }
         try validate(request, target: target)
         guard try result.get() else { return .targetUnavailable }
-        if let batch, !batch.pictureWorks.isEmpty {
-            observe?(.pictureReadyToPublish(request.token.requestID))
-            // 锁序与commit一致：播放gate→显示信箱。撤销若在线性化点之前发生，旧纹理只释放不发布。
+        if let batch, !batch.pictureWorks.isEmpty || !placeholderIDs.isEmpty || !marqueeIDs.isEmpty {
+            if !batch.pictureWorks.isEmpty { observe?(.pictureReadyToPublish(request.token.requestID)) }
+            // 锁序与commit一致：播放gate→显示信箱。撤销前不发布旧纹理，也不提前启动占位时钟。
             let published = request.gate.withCompletionPermission(for: request.token) {
                 target.mailbox.withCompletedEpochPermission(for: request.token.targetEpoch) {
-                    batch.publishPictures()
+                    if !batch.pictureWorks.isEmpty { batch.publishPictures() }
+                    request.scene?.placeholderClock?.activate(placeholderIDs, at: request.auxiliaryTime)
+                    request.scene?.marqueeClock?.activate(marqueeIDs, at: request.auxiliaryTime)
                     return true
                 } == true
             } == true

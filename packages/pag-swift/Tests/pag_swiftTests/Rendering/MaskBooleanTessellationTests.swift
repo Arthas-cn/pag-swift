@@ -178,6 +178,33 @@ struct MaskBooleanTessellationTests {
         }
     }
 
+    /// 全Difference快路径遇到重合边、非零孔洞及反向项时，仍逐点等于独立路径的异或。
+    @Test func differenceOnlyPreservesPerPathWindingAndOutside() throws {
+        let first = GeometryTestSupport.rectangle(0, 0, 12, 12)
+        let hole = GeometryTestSupport.rectangle(3, 3, 6, 6, reversed: true)
+        let second = GeometryTestSupport.rectangle(0, 0, 12, 12)
+        let third = GeometryTestSupport.rectangle(7, 1, 10, 10)
+        let result = try prepare([
+            .init(contours: [first, hole], mode: .difference, isInverted: false),
+            .init(contours: [second], mode: .difference, isInverted: true),
+            .init(contours: [third], mode: .difference, isInverted: false)
+        ])
+        #expect(result.isInverted)
+        let paths = [[first, hole], [second], [third]].map {
+            GeometryTestSupport.systemPath(GeometryTestSupport.outline($0))
+        }
+        for y in -2..<15 {
+            for x in -2..<19 {
+                let point = ScenePoint(x: Double(x) + 0.217, y: Double(y) + 0.389)
+                let inside = paths.map { $0.contains(CGPoint(x: point.x, y: point.y), using: .winding) }
+                let expected = (inside[0] != !inside[1]) != inside[2]
+                let finite = GeometryTestSupport.coverage(result.mesh, at: point)
+                #expect(finite <= 1)
+                #expect(((finite > 0) != result.isInverted) == expected)
+            }
+        }
+    }
+
     /// 非有限坐标、字节或工作上限以及预取消都显式失败，不返回部分网格。
     @Test func invalidAndLimitedWorkCannotPublishPartialResult() async throws {
         let contour = GeometryTestSupport.rectangle(0, 0, 10, 10)

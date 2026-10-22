@@ -32,12 +32,11 @@ struct PAGLevelsIndividualEvidenceTests {
         }
     }
 
-    /// clip2的tag63已进入相邻矩阵采样；clip1继续被独立的Glow tag61明确拒绝。
-    @Test func clip2DecodesAndClip1StopsAtGlow() async throws {
-        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "nodegroup_clip2.pag"))
-        #expect(file.composition.layers.contains { $0.kind == .precomposition })
-        await #expect(throws: PAGError.unsupportedFeature("layerTag:61")) {
-            try await PAGLoader().load(data: PAGFixtures.data(named: "nodegroup_clip1.pag"))
+    /// 两份真实clip均完整解码，clip1不再被层115三段效果的早期门禁截断。
+    @Test func clip1AndClip2DecodeAllEffects() async throws {
+        for name in ["nodegroup_clip1.pag", "nodegroup_clip2.pag"] {
+            let file = try await PAGLoader().load(data: PAGFixtures.data(named: name))
+            #expect(file.composition.layers.contains { $0.kind == .precomposition })
         }
     }
 }

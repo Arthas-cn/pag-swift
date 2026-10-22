@@ -30,6 +30,25 @@ struct PlaybackFrameRequest: Sendable {
     let gate: PlaybackSubmissionGate
     /// 内容请求可承担有限末帧，清屏必须为false，不改变empty或完成次数。
     let endsPlayback: Bool
+    /// 只有主动播放才允许外部视频会话在相邻PAG tick之间有界预取。
+    let isPlaying: Bool
+    /// 只累计实际播放的辅助时间，占位动图与跑马灯跨根循环共用此值。
+    let auxiliaryTime: PAGTime
+
+    /// 传递一次显示请求及播放意图；测试默认暂停采样以保持确定性。
+    init(scene: PreparedScene?, time: PAGTime, scaleMode: PAGScaleMode,
+         token: PlaybackRequestToken, gate: PlaybackSubmissionGate,
+         endsPlayback: Bool, isPlaying: Bool = false,
+         auxiliaryTime: PAGTime = .zero) {
+        self.scene = scene
+        self.time = time
+        self.scaleMode = scaleMode
+        self.token = token
+        self.gate = gate
+        self.endsPlayback = endsPlayback
+        self.isPlaying = isPlaying
+        self.auxiliaryTime = auxiliaryTime
+    }
 }
 
 /// 调度层依赖注入；默认准备真实资源，测试可以控制准备完成时间和单调时钟。

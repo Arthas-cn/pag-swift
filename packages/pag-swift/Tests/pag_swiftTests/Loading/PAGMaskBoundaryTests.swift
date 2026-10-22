@@ -99,7 +99,7 @@ struct PAGMaskBoundaryTests {
         let masks = file.storage.compositions.flatMap(\.layers).flatMap(\.masks)
         #expect(masks.count == 1 && masks[0].id == 2 && masks[0].mode == .add)
         let snapshot = try await LoadSnapshot.prepare(data: PAGFixtures.data(named: "red.pag"), limits: .standard)
-        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 30)
+        #expect(ParseKey(snapshot: snapshot, limits: .standard).decoderRevision == 35)
     }
 
     /// tag14开放后，三份此前被蒙版标签挡住的完整文件须保留源蒙版并成功载入。

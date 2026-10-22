@@ -53,8 +53,8 @@ final class MetalVideoInput {
             colorRegion: SIMD4(Float(frame.size.width), Float(frame.size.height), 1 / Float(width), 1 / Float(height)),
             alphaRegion: SIMD4(Float(frame.alphaStartX), Float(frame.alphaStartY),
                                frame.alphaStartX != 0 || frame.alphaStartY != 0 ? 1 : 0,
-                               CVMetalTextureIsFlipped(y.wrapper) ? 0 : 1)
-        )
+                               CVMetalTextureIsFlipped(y.wrapper) ? 0 : 1),
+            colorMatrix: frame.colorMatrix)
         byteCost = cost
         try Task.checkCancellation()
     }
@@ -79,4 +79,14 @@ struct MetalVideoUniforms: Sendable {
     let colorRegion: SIMD4<Float>
     /// xy为PAG alpha像素偏移，z为0/1启用标志，w为底部纹理原点的0/1翻转标志。
     let alphaRegion: SIMD4<Float>
+    /// x为0时使用PAG/系统601，x为1时使用外部视频709；其余分量保留对齐。
+    let matrixSelection: SIMD4<Float>
+
+    /// 将经系统附件验证的矩阵标为单个片元分支，旧PAG路径保持601。
+    init(colorRegion: SIMD4<Float>, alphaRegion: SIMD4<Float>,
+         colorMatrix: VideoColorMatrix = .bt601) {
+        self.colorRegion = colorRegion
+        self.alphaRegion = alphaRegion
+        matrixSelection = SIMD4(colorMatrix == .bt709 ? 1 : 0, 0, 0, 0)
+    }
 }

@@ -13,6 +13,12 @@ struct MetalFrameBatch {
     let pipelines: MetalPipelines
     /// 已上传的单帧凸裁剪边输入；draw常量按下标引用，GPU执行期间保持不变。
     let clipBuffer: any MTLBuffer
+    /// 局部内容pass结束后立刻执行的Glow两轴工作，键为该pass在passes中的下标。
+    let glowWorks: [Int: MetalGlowWork]
+    /// 与对应Glow两轴紧邻的Merge及FastBlur工作，先于任何祖先颜色pass。
+    let fastBlurWorks: [Int: MetalGlowFastBlurWork]
+    /// 内容pass后按完整语义域编码局部平铺与Glow的工作。
+    let mappedTileGlowWorks: [Int: MetalMappedTileGlowWork]
     /// 内容局部pass先于任何采样它的组或drawable pass编码。
     let pictureWorks: [MetalPictureWork]
     /// 羽化内容与各项alpha局部附件先于采样它们的根draw完成。
@@ -21,6 +27,10 @@ struct MetalFrameBatch {
     let trackMatteWorks: [MetalTrackMatteWork]
     /// 本帧投影的内容局部批次，输出仍由根pass直接写drawable。
     let dropShadowWorks: [MetalDropShadowWork]
+    /// Shape整层渐变叠加的局部内容与结果，最终由根pass按原层顺序采样。
+    let gradientOverlayWorks: [MetalGradientOverlayWork]
+    /// Shape整层FastBlur的局部批次及分轴Gaussian。
+    let shapeBlurBlendWorks: [MetalShapeBlurBlendWork]
     /// Text层Bulge的紧致内容局部批次，不建立整帧复制表面。
     let textBulgeWorks: [MetalTextBulgeWork]
     /// 仅根批次持有的Picture存储；局部批次自身不再递归生成Picture。
@@ -34,7 +44,15 @@ struct MetalFrameBatch {
         + featherWorks.reduce(0) { $0 + $1.drawCount }
         + trackMatteWorks.reduce(0) { $0 + $1.drawCount }
         + dropShadowWorks.reduce(0) { $0 + $1.drawCount }
+        + gradientOverlayWorks.reduce(0) { $0 + $1.drawCount }
+        + shapeBlurBlendWorks.reduce(0) { $0 + $1.drawCount }
         + textBulgeWorks.reduce(0) { $0 + $1.drawCount }
+        + glowWorks.count * 2
+        + mappedTileGlowWorks.count * 3
+        + fastBlurWorks.values.reduce(0) { count, work in
+            count + 3 + (work.blur.layout.x.kernel == nil ? 0 : 1)
+                + (work.blur.layout.y.kernel == nil ? 0 : 1)
+        }
     }
 
     /// 提交前放弃或GPU已完成时归还；旧批次重复调用不能释放新的纹理借用。
@@ -47,6 +65,8 @@ struct MetalFrameBatch {
         for work in featherWorks { work.releaseTransients() }
         for work in trackMatteWorks { work.releaseTransients() }
         for work in dropShadowWorks { work.releaseTransients() }
+        for work in gradientOverlayWorks { work.releaseTransients() }
+        for work in shapeBlurBlendWorks { work.releaseTransients() }
         for work in textBulgeWorks { work.releaseTransients() }
     }
 
@@ -66,6 +86,8 @@ struct MetalFrameBatch {
         for work in featherWorks { try work.encode(commandBuffer: commandBuffer, pipelines: pipelines) }
         for work in trackMatteWorks { try work.encode(commandBuffer: commandBuffer) }
         for work in dropShadowWorks { try work.encode(commandBuffer: commandBuffer) }
+        for work in gradientOverlayWorks { try work.encode(commandBuffer: commandBuffer) }
+        for work in shapeBlurBlendWorks { try work.encode(commandBuffer: commandBuffer, pipelines: pipelines) }
         for work in textBulgeWorks { try work.encode(commandBuffer: commandBuffer) }
         try encodeContent(to: texture, commandBuffer: commandBuffer)
     }
@@ -79,6 +101,8 @@ struct MetalFrameBatch {
         for work in trackMatteWorks { try work.encode(commandBuffer: commandBuffer) }
         // 父投影的局部内容可包含子投影；子纹理必须先完成，父批次才能读取。
         for work in dropShadowWorks { try work.encode(commandBuffer: commandBuffer) }
+        for work in gradientOverlayWorks { try work.encode(commandBuffer: commandBuffer) }
+        for work in shapeBlurBlendWorks { try work.encode(commandBuffer: commandBuffer, pipelines: pipelines) }
         for work in textBulgeWorks { try work.encode(commandBuffer: commandBuffer) }
         try encodeContent(to: texture, commandBuffer: commandBuffer)
     }
@@ -98,6 +122,17 @@ struct MetalFrameBatch {
                 throw PAGError.renderingFailure("metalPassOrder")
             }
             try encode(pass, texture: pass.attachment?.texture ?? texture, commandBuffer: commandBuffer)
+            // 父组可能紧接着读取Glow结果；两轴不能延后到全部局部组结束才编码。
+            if let glow = glowWorks[index] {
+                try glow.encode(commandBuffer: commandBuffer, pipeline: pipelines.glowBlur)
+            }
+            if let mapped = mappedTileGlowWorks[index] {
+                try mapped.encode(commandBuffer: commandBuffer, pipelines: pipelines)
+            }
+            if let blur = fastBlurWorks[index] {
+                // 同一内容pass的Glow Merge必须在两轴结果之后，父pass读取Blur前完成。
+                try blur.encode(commandBuffer: commandBuffer, pipelines: pipelines)
+            }
         }
     }
 
@@ -149,7 +184,39 @@ struct MetalFrameBatch {
         for draw in pass.draws {
             try Task.checkCancellation()
             let pipeline: any MTLRenderPipelineState
-            if draw.screenBlend {
+            if draw.hardLightBlend {
+                guard draw.texture != nil, draw.mask == nil, draw.parentMask == nil,
+                      draw.video == nil, draw.gradient == nil,
+                      (draw.featherMaskTexture != nil) == (draw.trackMatteMode != nil),
+                      !draw.screenBlend, !draw.isShadow,
+                      draw.motionTile == nil, draw.bulge == nil, draw.cornerPin == nil,
+                      draw.glow == nil, draw.tileGlowBulge == nil else {
+                    throw PAGError.unsupportedFeature("metalHardLightDevice")
+                }
+                guard let hardLight = draw.trackMatteMode == nil ? pipelines.hardLightImage :
+                    pipelines.hardLightTrackMatteImage else {
+                    throw PAGError.unsupportedFeature("metalHardLightDevice")
+                }
+                pipeline = hardLight
+            } else if draw.tileGlowBulge != nil {
+                guard draw.texture != nil, draw.mask == nil, draw.video == nil,
+                      draw.gradient == nil, draw.featherMaskTexture == nil,
+                      draw.trackMatteMode == nil, draw.motionTile == nil,
+                      draw.bulge == nil, draw.cornerPin == nil, draw.glow == nil,
+                      !draw.screenBlend, !draw.isShadow else {
+                    throw PAGError.renderingFailure("metalTileGlowBulgeMaterial")
+                }
+                pipeline = pipelines.tileGlowBulgeImage
+            } else if draw.glow != nil {
+                guard draw.texture != nil, draw.mask == nil, draw.video == nil,
+                      draw.gradient == nil, draw.featherMaskTexture == nil,
+                      draw.trackMatteMode == nil, draw.motionTile == nil,
+                      draw.bulge == nil, draw.cornerPin == nil,
+                      !draw.screenBlend, !draw.isShadow else {
+                    throw PAGError.renderingFailure("metalGlowMaterial")
+                }
+                pipeline = pipelines.glowImage
+            } else if draw.screenBlend {
                 // 子内容已在局部附件SrcOver合成，只有整层结果可用Screen系数写当前附件。
                 guard draw.texture != nil, draw.mask == nil, draw.video == nil,
                       draw.gradient == nil, draw.featherMaskTexture == nil,
@@ -168,6 +235,15 @@ struct MetalFrameBatch {
                     }
                     pipeline = draw.levelsGreenOnly ? pipelines.screenGreenImage : pipelines.screenImage
                 }
+            } else if draw.motionBlur != nil && draw.motionTile == nil {
+                guard draw.texture != nil, draw.textBulgeMap != nil, draw.mask == nil,
+                      draw.featherMaskTexture == nil, draw.video == nil, draw.gradient == nil,
+                      draw.motionTile == nil, draw.bulge == nil, draw.cornerPin == nil,
+                      draw.glow == nil, draw.tileGlowBulge == nil,
+                      draw.trackMatteMode == nil, !draw.isShadow else {
+                    throw PAGError.renderingFailure("metalMappedMotionBlurMaterial")
+                }
+                pipeline = pipelines.mappedMotionBlurImage
             } else if draw.isShadow {
                 guard draw.texture != nil, draw.featherMaskTexture == nil, draw.video == nil,
                       draw.gradient == nil, draw.mask == nil else {
@@ -208,7 +284,15 @@ struct MetalFrameBatch {
                       draw.trackMatteMode == nil else {
                     throw PAGError.renderingFailure("metalMotionTileMaterial")
                 }
-                pipeline = draw.mask == nil ? pipelines.motionTileImage : pipelines.maskedMotionTileImage
+                if draw.motionBlur != nil {
+                    guard draw.mask == nil, draw.bulge == nil, draw.cornerPin == nil,
+                          !draw.isShadow else {
+                        throw PAGError.renderingFailure("metalMotionTileBlurMaterial")
+                    }
+                    pipeline = pipelines.motionTileBlurImage
+                } else {
+                    pipeline = draw.mask == nil ? pipelines.motionTileImage : pipelines.maskedMotionTileImage
+                }
             } else if draw.bulge != nil {
                 guard draw.texture != nil, draw.featherMaskTexture == nil,
                       draw.video == nil, draw.gradient == nil,
@@ -275,7 +359,8 @@ struct MetalFrameBatch {
                 encoder.setFragmentTexture(video.chroma, index: 1)
             } else {
                 encoder.setFragmentTexture(draw.texture, index: 0)
-                encoder.setFragmentTexture(draw.featherMaskTexture, index: 1)
+                encoder.setFragmentTexture(draw.tileGlowBulge?.blurred ??
+                    draw.glow?.texture ?? draw.featherMaskTexture, index: 1)
             }
             if var tile = draw.motionTile {
                 encoder.setFragmentBytes(&tile, length: MemoryLayout<MetalMotionTileUniforms>.stride, index: 6)
@@ -291,6 +376,13 @@ struct MetalFrameBatch {
             }
             if var blur = draw.motionBlur {
                 encoder.setFragmentBytes(&blur, length: MemoryLayout<MetalMotionBlurUniforms>.stride, index: 16)
+            }
+            if var threshold = draw.glow?.threshold {
+                encoder.setFragmentBytes(&threshold, length: MemoryLayout<Float>.stride, index: 11)
+            }
+            if var mapped = draw.tileGlowBulge?.uniforms {
+                encoder.setFragmentBytes(&mapped, length: MemoryLayout<MetalTileGlowBulgeUniforms>.stride,
+                    index: 11)
             }
             // 一个包围矩形只生成一次片元覆盖；内部三角形由片元累积后统一SrcOver。
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -340,10 +432,16 @@ struct MetalDraw {
     let isShadow: Bool
     /// 仅整层Screen组最终绘回时选择固定混合系数。
     let screenBlend: Bool
+    /// 最终Shape结果在可编程混合片元读取当前附件；与Screen固定系数互斥。
+    let hardLightBlend: Bool
     /// tag57精确静态参数只让绿色与alpha进入Screen混合。
     let levelsGreenOnly: Bool
     /// tag63效果后37次采样常量；nil表示普通Screen结果。
     let motionBlur: MetalMotionBlurUniforms?
+    /// tag61两轴局部结果及Merge阈值；仅作用于整个图层的单个结果draw。
+    let glow: MetalGlowInput?
+    /// 有界MotionTile/Glow输入在最终颜色pass融合Bulge，保留原绘制顺序。
+    let tileGlowBulge: MetalTileGlowBulgeInput?
 }
 
 /// 已经确定尺寸和常量的单个渲染pass，不包含公共离屏输出能力。

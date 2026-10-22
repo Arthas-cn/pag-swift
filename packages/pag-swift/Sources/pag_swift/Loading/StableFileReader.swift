@@ -1,8 +1,54 @@
 import Darwin
+import CryptoKit
 import Foundation
 
 /// 从本地普通文件取得有界稳定快照；文件描述符仅在一次后台调用中存活。
 enum StableFileReader {
+    /// 外部媒体逐块核对完整身份，不把整段MP4/MOV编码字节同时保留两份。
+    @concurrent static func identity(from url: URL, limits: PAGLoadLimits) async throws -> DocumentIdentity {
+        try Task.checkCancellation()
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else {
+            throw PAGError.unsupportedURL
+        }
+        let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+        let initialPath = try metadata(at: canonical)
+        try validateFile(initialPath, limits: limits)
+        let descriptor = canonical.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else { throw ioError() }
+        defer { Darwin.close(descriptor) }
+        let initialHandle = try metadata(of: descriptor)
+        guard initialHandle == initialPath else { throw PAGError.sourceChanged }
+        var hash = SHA256()
+        var bytesRead = 0
+        var buffer = [UInt8](repeating: 0, count: min(65_536, max(1, Int(initialHandle.byteCount))))
+        while true {
+            try Task.checkCancellation()
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw ioError()
+            }
+            if count == 0 { break }
+            guard count <= Int(initialHandle.byteCount) - bytesRead else { throw PAGError.sourceChanged }
+            hash.update(data: Data(buffer.prefix(count)))
+            bytesRead += count
+        }
+        try Task.checkCancellation()
+        let finalHandle = try metadata(of: descriptor)
+        let finalCanonical = url.standardizedFileURL.resolvingSymlinksInPath()
+        let finalPath: FileFingerprint
+        do { finalPath = try metadata(at: canonical) }
+        catch { throw PAGError.sourceChanged }
+        guard finalCanonical == canonical, finalHandle == initialHandle, finalPath == initialHandle,
+              bytesRead == initialHandle.byteCount else { throw PAGError.sourceChanged }
+        return DocumentIdentity(sha256: hash.finalize())
+    }
+
     /// 逐块读取并比较来源身份；变化抛 sourceChanged，其他失败保留 POSIX 错误码。
     /// beforeVerification 仅供内部确定性验证，在读取完毕、最终来源核对前执行。
     @concurrent static func read(from url: URL, limits: PAGLoadLimits,

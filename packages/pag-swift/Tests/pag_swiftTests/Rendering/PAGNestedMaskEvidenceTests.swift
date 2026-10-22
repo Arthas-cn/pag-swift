@@ -30,6 +30,11 @@ struct PAGNestedMaskEvidenceTests {
                     case .path(let path): kind = "path verbs=\(path.verbs.count) points=\(path.points.count)"
                     case .expression(let expression):
                         kind = "expression terms=\(expression.terms.count) points=\(expression.terms.reduce(0) { $0 + $1.path.points.count })"
+                        if ProcessInfo.processInfo.environment["PAG_NESTED_MASK_AUDIT"] == "1", name == "travel.pag" {
+                            let modes = Dictionary(grouping: expression.terms, by: { $0.mode.rawValue })
+                                .map { "\($0.key):\($0.value.count)" }.sorted().joined(separator: ",")
+                            print("PAG_NESTED_MASK_TERMS layer=\(mask.layerID.path) modes=\(modes) expansion=\(expression.terms.filter { $0.expansion != 0 }.count) inverted=\(expression.terms.filter { $0.isInverted }.count)")
+                        }
                     case .feather: kind = "feather"
                     }
                     lines.append("\(index) begin depth=\(depth) layer=\(mask.layerID.path) kind=\(kind) inverse=\(mask.isInverted)")
@@ -76,6 +81,10 @@ struct PAGNestedMaskEvidenceTests {
         case .endTrackMatte: "endTrackMatte"
         case .beginDropShadow: "beginDropShadow"
         case .endDropShadow: "endDropShadow"
+        case .beginGradientOverlay: "beginGradientOverlay"
+        case .endGradientOverlay: "endGradientOverlay"
+        case .beginShapeBlurBlend: "beginShapeBlurBlend"
+        case .endShapeBlurBlend: "endShapeBlurBlend"
         case .beginOpacityGroup: "beginOpacityGroup"
         case .endOpacityGroup: "endOpacityGroup"
         case .beginPicture: "beginPicture"

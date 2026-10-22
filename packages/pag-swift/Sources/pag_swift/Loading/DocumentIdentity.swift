@@ -19,4 +19,7 @@ struct DocumentIdentity: Sendable, Hashable {
         }
         digest = Array(hash.finalize())
     }
+
+    /// 接受逐块哈希的最终摘要，供不应整文件留存在内存中的外部媒体使用。
+    init(sha256: SHA256.Digest) { digest = Array(sha256) }
 }

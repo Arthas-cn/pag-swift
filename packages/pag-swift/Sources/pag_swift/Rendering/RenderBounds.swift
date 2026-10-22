@@ -62,6 +62,23 @@ struct RenderBounds: Sendable, Equatable {
         }
         return RenderPixelRect(x: x, y: y, width: width.partialValue, height: height.partialValue)
     }
+
+    /// MotionBlur输入图像按上游已roundOut的语义内容域分配，不额外加普通组的透明采样边。
+    func exactPixelRect(clippedTo limit: RenderBounds) throws -> RenderPixelRect? {
+        guard let value = intersection(limit) else { return nil }
+        guard let x = Int(exactly: floor(value.left)), let y = Int(exactly: floor(value.top)),
+              let r = Int(exactly: ceil(value.right)), let b = Int(exactly: ceil(value.bottom)),
+              r > x, b > y else {
+            throw PAGError.resourceLimitExceeded("metalGroupDimensions")
+        }
+        let width = r.subtractingReportingOverflow(x), height = b.subtractingReportingOverflow(y)
+        guard !width.overflow, !height.overflow,
+              width.partialValue <= 16_384, height.partialValue <= 16_384 else {
+            throw PAGError.resourceLimitExceeded("metalGroupDimensions")
+        }
+        return RenderPixelRect(x: x, y: y,
+            width: width.partialValue, height: height.partialValue)
+    }
 }
 
 /// 已裁到显示范围的整数像素附件区域，不表示公共离屏画布。

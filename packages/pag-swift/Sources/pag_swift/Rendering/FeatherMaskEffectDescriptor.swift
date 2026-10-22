@@ -155,6 +155,14 @@ enum FeatherMaskEffectPreparation {
                 layerMatrix: shadow.layerMatrix, styles: shadow.styles, opacity: shadow.opacity))
         case .endDropShadow:
             return .endDropShadow
+        case .beginGradientOverlay, .endGradientOverlay, .endShapeBlurBlend:
+            // 样式角度与图层alpha不随局部附件平移；内部Shape矩阵另行重映。
+            return command
+        case .beginShapeBlurBlend(let effect):
+            // 轨道遮罩等外层局部批次会移动目标，滤镜的层矩阵必须和内容一起重映。
+            return .beginShapeBlurBlend(FrameShapeBlurBlend(layerID: effect.layerID,
+                matrix: try mapping(effect.matrix, inverse: inverse, texture: texture),
+                blur: effect.blur, opacity: effect.opacity, blendMode: effect.blendMode))
         case .beginPicture(let picture):
             // 局部批次关闭可选缓存，但标记仍须与同步重映后的原图元通过范围验证。
             return .beginPicture(FramePicture(document: picture.document, source: picture.source,
@@ -176,9 +184,12 @@ enum FeatherMaskEffectPreparation {
                 clip: clip, opacity: image.opacity, contentTime: image.contentTime,
                 motionTile: image.motionTile, bulge: image.bulge, cornerPin: image.cornerPin))
         case .video(let video):
+            let clip = try video.clip.map { value in
+                FrameClip(size: value.size, matrix: try mapping(value.matrix, inverse: inverse, texture: texture))
+            }
             return .video(FrameVideo(layerID: video.layerID, resourceID: video.resourceID,
                 pixelSize: video.pixelSize, matrix: try mapping(video.matrix, inverse: inverse, texture: texture),
-                opacity: video.opacity))
+                opacity: video.opacity, clip: clip))
         case .shape(let shape):
             return .shape(FrameShape(layerID: shape.layerID, geometryID: shape.geometryID,
                 matrix: try mapping(shape.matrix, inverse: inverse, texture: texture),

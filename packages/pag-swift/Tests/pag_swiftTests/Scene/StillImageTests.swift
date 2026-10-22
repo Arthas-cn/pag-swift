@@ -62,12 +62,15 @@ struct StillImageTests {
         #expect(image.size == (try PAGSize(width: 110, height: 110)))
     }
 
-    /// 真实多帧 GIF/WebP 在 P2 明确拒绝，不能静默返回首帧并伪称动图。
-    @Test(arguments: [("bear.gif", UTType.gif.identifier), ("webp01.webp", UTType.webP.identifier)])
-    func animatedSourcesFailExplicitly(_ name: String, _ type: String) async throws {
-        await #expect(throws: PAGError.unsupportedAnimatedImage(type)) {
-            try await PAGImage.load(data: PAGFixtures.data(named: "media/\(name)"))
-        }
+    /// 真实多帧 GIF/WebP 必须公开动图句柄和一轮时长，后续帧不得被静默折成首帧。
+    @Test(arguments: [("bear.gif", 15), ("webp01.webp", 10)])
+    func animatedSourcesExposeFrames(_ name: String, _ count: Int) async throws {
+        let image = try await PAGImage.load(data: PAGFixtures.data(named: "media/\(name)"))
+        let animation = try #require(image.animation)
+        #expect(image.kind == .animated)
+        #expect(animation.ends.count == count)
+        #expect(image.duration == PAGTime(microseconds: animation.durationMicroseconds))
+        #expect(animation.durationMicroseconds > 0)
     }
 
     /// 预算在分配完整像素前生效，给输入解码、方向和 RGBA 缓冲计三份成本。

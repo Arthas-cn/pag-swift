@@ -306,6 +306,7 @@ public actor PAGPlayer {
             revokeWork()
             playbackEpoch = UUID()
         }
+        await scene?.externalVideos?.pause()
         enqueueCurrent()
         publish()
     }
@@ -313,12 +314,15 @@ public actor PAGPlayer {
     /// stop 遵守保留位置的暂停语义，不清空图像或重置计数。
     public func stop() async { await pause() }
 
-    /// 暂停并回零，撤销所有旧时间工作；无合成或失败时抛对应领域错误。
+    /// 暂停并回零，撤销旧时间工作和附加动画起点；无合成或失败时抛对应领域错误。
     public func rewind() async throws {
         try Task.checkCancellation()
         try timeline.rewind()
         revokeWork()
+        scene?.marqueeClock?.reset()
+        scene?.placeholderClock?.reset()
         playbackEpoch = UUID()
+        await scene?.externalVideos?.pause()
         enqueueCurrent()
         publish()
     }
@@ -405,7 +409,10 @@ public actor PAGPlayer {
                                          compositionRevision: revision, playbackEpoch: playbackEpoch,
                                          targetEpoch: targetEpoch, requestID: UUID())
         let request = PlaybackFrameRequest(scene: scene, time: timeline.position, scaleMode: scaleMode,
-                                           token: token, gate: gate, endsPlayback: timeline.awaitsFinalFrame)
+                                           token: token, gate: gate, endsPlayback: timeline.awaitsFinalFrame,
+                                           isPlaying: timeline.state == .playing,
+                                           auxiliaryTime: PAGTime(microseconds: Int64(min(timeline.activeElapsed,
+                                               UInt64(Int64.max)))))
         return QueuedPlaybackFrame(request: request, waiter: waiter)
     }
 

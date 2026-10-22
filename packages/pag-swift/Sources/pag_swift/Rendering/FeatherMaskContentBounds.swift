@@ -1,3 +1,5 @@
+import Foundation
+
 /// 羽化层原始内容在该图层局部坐标中的范围；不以屏幕可见draw范围截断模糊输入。
 enum FeatherMaskContentBounds {
     /// 测量一对羽化蒙版内的内容；子层普通矩形蒙版先裁其作用域范围，未接通的效果明确失败。
@@ -6,14 +8,15 @@ enum FeatherMaskContentBounds {
                         budget: inout MetalFrameBudget,
                         allowDropShadow: Bool = false,
                         allowTrackMatte: Bool = false,
+                        allowConservativeMasks: Bool = false,
                         allowTextBulge: Bool = false) throws -> RenderBounds? {
         try Task.checkCancellation()
         let inverse = try layerMatrix.inverted()
         var groupClips: [RenderBounds?] = []
-        var maskScopes: [(previous: RenderBounds?, clip: RenderBounds)] = []
+        var maskScopes: [(previous: RenderBounds?, clip: RenderBounds?)] = []
         var shadowScopes: [(previous: RenderBounds?, shadow: FrameDropShadow)] = []
-        var trackMatteOwnerStarted = false
-        var trackMatteOpen = false
+        var shapeBlurScopes: [(previous: RenderBounds?, effect: FrameShapeBlurBlend)] = []
+        var trackMatteSourcesEnded: [Bool] = []
         var opacityDepth = 0
         var bounds: RenderBounds?
         for command in commands {
@@ -104,37 +107,60 @@ enum FeatherMaskContentBounds {
             case .beginMask(let mask):
                 // 子Graphic先独立合并其draw，再与普通矩形clip求交；不能逐draw裁掉后和兄弟混算。
                 guard maskScopes.isEmpty else { throw PAGError.unsupportedFeature("nestedMaskPaths") }
-                let clip = try rectangleClip(mask, inverse: inverse, budget: &budget)
+                // 轨道遮罩只用此范围分配局部附件；羽化父层仍须执行原来的严格矩形门禁。
+                let clip = try allowConservativeMasks
+                    ? conservativeClip(mask, inverse: inverse, budget: &budget)
+                    : rectangleClip(mask, inverse: inverse, budget: &budget)
                 maskScopes.append((previous: bounds, clip: clip))
                 bounds = nil
             case .endMask:
                 guard let scope = maskScopes.popLast() else {
                     throw PAGError.renderingFailure("featherContentMaskScope")
                 }
-                let clipped = bounds?.intersection(scope.clip)
+                let clipped: RenderBounds? = if let clip = scope.clip { bounds?.intersection(clip) } else { nil }
                 bounds = if let clipped { scope.previous.map { $0.union(clipped) } ?? clipped }
                          else { scope.previous }
-            case .beginPicture, .endPicture, .beginVectorPicture, .endVectorPicture:
+            case .beginPicture, .endPicture, .beginVectorPicture, .endVectorPicture,
+                 .beginGradientOverlay, .endGradientOverlay:
                 // Picture只是可选缓存标记，真实原命令仍在范围内，不能把标记计成内容。
                 break
+            case .beginShapeBlurBlend(let effect):
+                shapeBlurScopes.append((previous: bounds, effect: effect))
+                bounds = nil
+            case .endShapeBlurBlend:
+                guard let scope = shapeBlurScopes.popLast() else {
+                    throw PAGError.renderingFailure("unbalancedShapeBlurBounds")
+                }
+                let filtered: RenderBounds?
+                if let content = bounds {
+                    let mapped = try scope.effect.matrix.following(inverse)
+                    let local = try content.transformed(by: mapped.inverted())
+                    // Decal边缘的Gaussian必须扩大轨道遮罩等祖先局部附件，不能只量原Shape紧界。
+                    let halo = scope.effect.blur.repeatEdgePixels ? 0 :
+                        max(0, scope.effect.blur.blurriness) + 1
+                    let expanded = try RenderBounds(left: floor(local.left) - halo,
+                        top: floor(local.top) - halo, right: ceil(local.right) + halo,
+                        bottom: ceil(local.bottom) + halo)
+                    filtered = try expanded.transformed(by: mapped)
+                } else { filtered = nil }
+                bounds = scope.previous
+                if let filtered { bounds = union(filtered, clippedBy: groupClips.last, into: bounds) }
             case .beginTrackMatte:
-                guard allowTrackMatte, !trackMatteOpen else {
+                guard allowTrackMatte, trackMatteSourcesEnded.count < 32 else {
                     throw PAGError.unsupportedFeature("nestedTrackMatte")
                 }
-                trackMatteOpen = true
-                trackMatteOwnerStarted = false
+                trackMatteSourcesEnded.append(false)
             case .endTrackMatteSource:
-                guard trackMatteOpen, !trackMatteOwnerStarted else {
+                guard trackMatteSourcesEnded.last == false else {
                     throw PAGError.renderingFailure("unbalancedTrackMatteBounds")
                 }
-                trackMatteOwnerStarted = true
+                trackMatteSourcesEnded[trackMatteSourcesEnded.count - 1] = true
             case .endTrackMatte:
-                guard trackMatteOpen, trackMatteOwnerStarted else {
+                guard trackMatteSourcesEnded.last == true else {
                     throw PAGError.renderingFailure("unbalancedTrackMatteBounds")
                 }
                 // 这里只取源与拥有者的保守并集；实际Alpha相乘仍在双输入GPU批次完成。
-                trackMatteOpen = false
-                trackMatteOwnerStarted = false
+                trackMatteSourcesEnded.removeLast()
             case .beginDropShadow(let shadow):
                 guard allowDropShadow else { throw PAGError.unsupportedFeature("dropShadowInOtherEffectBounds") }
                 guard shadow.styles.allSatisfy({ $0.spread.isFinite && (0...1).contains($0.spread) }) else {
@@ -172,7 +198,8 @@ enum FeatherMaskContentBounds {
             }
         }
         guard groupClips.isEmpty, maskScopes.isEmpty, shadowScopes.isEmpty,
-              !trackMatteOpen, opacityDepth == 0 else {
+              shapeBlurScopes.isEmpty,
+              trackMatteSourcesEnded.isEmpty, opacityDepth == 0 else {
             throw PAGError.renderingFailure("featherContentUnbalancedScope")
         }
         try Task.checkCancellation()
@@ -184,6 +211,39 @@ enum FeatherMaskContentBounds {
                                     inverse: SceneAffine) throws -> RenderBounds {
         let local = try matrix.following(inverse)
         return try RenderBounds(left: 0, top: 0, right: size.width, bottom: size.height).transformed(by: local)
+    }
+
+    /// 只为轨道遮罩量非反向路径的保守范围；真实Boolean和覆盖仍由后续GPU网格完成。
+    private static func conservativeClip(_ mask: FrameMask, inverse: SceneAffine,
+                                         budget: inout MetalFrameBudget) throws -> RenderBounds? {
+        guard !mask.isInverted else { throw PAGError.unsupportedFeature("nestedMaskPaths") }
+        let terms: [(SourcePath, Float)]
+        switch mask.source {
+        case .path(let path): terms = [(path, 0)]
+        case .expression(let expression):
+            guard !expression.isInverted, expression.terms.allSatisfy({ !$0.isInverted }) else {
+                throw PAGError.unsupportedFeature("nestedMaskPaths")
+            }
+            terms = expression.terms.map { ($0.path, $0.expansion) }
+        case .feather: throw PAGError.unsupportedFeature("nestedMaskPaths")
+        }
+        var bounds: RenderBounds?
+        for (path, expansion) in terms {
+            try Task.checkCancellation()
+            try budget.reserve(64)
+            guard !path.points.isEmpty else { continue }
+            let charge = path.points.count.multipliedReportingOverflow(by: 16)
+            guard !charge.overflow else { throw PAGError.resourceLimitExceeded("maximumMetalFrameBytes") }
+            try budget.reserve(charge.partialValue)
+            let halo = Double(max(0, expansion))
+            let rect = try RenderBounds(left: path.points.map(\.x).min()! - halo,
+                top: path.points.map(\.y).min()! - halo,
+                right: path.points.map(\.x).max()! + halo,
+                bottom: path.points.map(\.y).max()! + halo)
+            bounds = bounds.map { $0.union(rect) } ?? rect
+        }
+        guard let bounds else { return nil }
+        return try bounds.transformed(by: mask.matrix.following(inverse))
     }
 
     /// 仅将非反向严格闭合轴对齐四角路径映入父羽化局部；其它子效果须保留明确门禁。

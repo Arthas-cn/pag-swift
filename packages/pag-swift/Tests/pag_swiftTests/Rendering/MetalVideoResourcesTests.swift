@@ -57,7 +57,7 @@ private actor MetalVideoTestOwner {
         #expect(input.uniforms.alphaRegion.x == Float(frame.alphaStartX))
         #expect(input.uniforms.alphaRegion.y == Float(frame.alphaStartY))
         #expect(input.uniforms.alphaRegion.z == (frame.alphaStartX == 0 && frame.alphaStartY == 0 ? 0 : 1))
-        #expect(MemoryLayout<MetalVideoUniforms>.stride == 32)
+        #expect(MemoryLayout<MetalVideoUniforms>.stride == 48)
         #expect(try resources.video(frame, budget: &budget) === input)
         var next = try MetalFrameBudget()
         #expect(try resources.video(frame, budget: &next) === input)

@@ -72,14 +72,20 @@ struct SourceLayer: Sendable {
     let textPath: SourceTextPathOption?
     /// 按tag70编码顺序保留的文字动画器；空数组表示无逐字形效果。
     let textAnimators: [SourceTextAnimator]
-    /// 按tag29/65编码顺序保留的静态下方投影；空数组表示无图层样式。
+    /// 按tag29/65编码顺序保留的静态下方投影；空数组仅表示没有投影。
     let dropShadows: [SourceDropShadow]
+    /// tag85整层渐变叠加；nil表示未编码，不把样式摊成每个Shape的填充。
+    let gradientOverlay: SourceGradientOverlay?
     /// 图像层的tag56平铺轨道；nil表示按普通图像直接采样。
     let motionTile: SourceMotionTile?
     /// 图像层的tag59凸出轨道；nil表示输入纹理没有空间扭曲。
     let bulge: SourceBulge?
     /// 图像层tag58的四角透视轨道；nil表示无四边形输出变形。
     let cornerPin: SourceCornerPin?
+    /// tag61预合成完整内容的Glow轨道；nil表示无需两轴模糊与Merge。
+    let glow: SourceGlow?
+    /// tag60在Glow之后的Gaussian轨道；nil表示没有后续模糊阶段。
+    let fastBlur: SourceFastBlur?
     /// 文件内图层标记，保留原始帧与备注；不参与画面求值，没有标记时为空。
     let markers: [SourceMarker]
     /// 文件中的层时间字段；不把它与ImageFillRule的素材采样轨道混用。
@@ -95,8 +101,10 @@ struct SourceLayer: Sendable {
          transform: SourceTransformProperties, content: SourceLayerContent,
          masks: [SourceMask] = [], textPath: SourceTextPathOption? = nil,
          textAnimators: [SourceTextAnimator] = [], dropShadows: [SourceDropShadow] = [],
+         gradientOverlay: SourceGradientOverlay? = nil,
          motionTile: SourceMotionTile? = nil, bulge: SourceBulge? = nil,
-         cornerPin: SourceCornerPin? = nil,
+         cornerPin: SourceCornerPin? = nil, glow: SourceGlow? = nil,
+         fastBlur: SourceFastBlur? = nil,
          markers: [SourceMarker] = [], timing: SourceLayerTiming = .identity,
          imageFillRule: SourceImageFillRule? = nil) {
         self.id = id
@@ -115,9 +123,12 @@ struct SourceLayer: Sendable {
         self.textPath = textPath
         self.textAnimators = textAnimators
         self.dropShadows = dropShadows
+        self.gradientOverlay = gradientOverlay
         self.motionTile = motionTile
         self.bulge = bulge
         self.cornerPin = cornerPin
+        self.glow = glow
+        self.fastBlur = fastBlur
         self.markers = markers
         self.timing = timing
         self.imageFillRule = imageFillRule

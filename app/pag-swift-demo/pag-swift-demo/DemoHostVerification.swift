@@ -13,6 +13,8 @@ import pag_swift
     let setNativeHidden: @MainActor (Bool) -> Void
     /// 调整两个真实宿主的点高度；零表示不可呈现，恢复后继续原播放器。
     let setHeight: @MainActor (Double) -> Void
+    /// 自动验收结束时两个宿主须实际提交的源时间；clip1用故障后的效果帧。
+    let finalFrameTime: PAGTime
 
     /// 仅显式传入启动参数时执行自动验收，普通演示启动不操作用户界面。
     static var isRequested: Bool { ProcessInfo.processInfo.arguments.contains("--verify-pag-hosts") }
@@ -50,7 +52,7 @@ import pag_swift
                 await player.pause()
                 await player.setScaleMode(.aspectFit)
             }
-            let represented = try await align(to: PAGTime(microseconds: 2_000_000))
+            let represented = try await align(to: finalFrameTime)
             report("最终两个宿主均暂停在\(represented.microseconds)μs")
             return "宿主验收通过（7项）"
         } catch {

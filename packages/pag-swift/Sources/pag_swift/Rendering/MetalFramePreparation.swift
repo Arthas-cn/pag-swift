@@ -38,6 +38,8 @@ enum MetalFramePreparation {
                 for work in builder.featherWorks { work.releaseTransients() }
                 for work in builder.trackMatteWorks { work.releaseTransients() }
                 for work in builder.dropShadowWorks { work.releaseTransients() }
+                for work in builder.gradientOverlayWorks { work.releaseTransients() }
+                for work in builder.shapeBlurBlendWorks { work.releaseTransients() }
                 for work in builder.textBulgeWorks { work.releaseTransients() }
             }
         }
@@ -50,7 +52,9 @@ enum MetalFramePreparation {
                 try builder.enter(kind: .composition, clip: group.clip, opacity: group.opacity,
                                   application: group.application, blendMode: group.blendMode,
                                   levelsGreenOnly: group.levelsGreenOnly, motionTile: group.motionTile,
-                                  motionBlur: group.motionBlur)
+                                  motionBlur: group.motionBlur, glow: group.glow,
+                                  fastBlur: group.fastBlur,
+                                  tileGlowBulge: group.tileGlowBulge)
             case .endGroup: try builder.leave(kind: .composition)
             case .beginMask(let mask):
                 if case .feather = mask.source {
@@ -77,6 +81,21 @@ enum MetalFramePreparation {
                 continue
             case .endDropShadow:
                 throw PAGError.renderingFailure("metalUnbalancedDropShadow")
+            case .beginGradientOverlay(let overlay):
+                let end = try gradientOverlayEnd(in: frame.plan.commands, after: index)
+                try builder.gradientOverlay(overlay,
+                    content: frame.plan.commands[(index + 1)..<end])
+                index = end + 1
+                continue
+            case .endGradientOverlay:
+                throw PAGError.renderingFailure("metalUnbalancedGradientOverlay")
+            case .beginShapeBlurBlend(let effect):
+                let end = try shapeBlurBlendEnd(in: frame.plan.commands, after: index)
+                try builder.shapeBlurBlend(effect, content: frame.plan.commands[(index + 1)..<end])
+                index = end + 1
+                continue
+            case .endShapeBlurBlend:
+                throw PAGError.renderingFailure("metalUnbalancedShapeBlurBlend")
             case .beginOpacityGroup(let group):
                 try builder.enter(kind: .opacity, clip: nil, opacity: group.opacity, application: group.application)
             case .endOpacityGroup: try builder.leave(kind: .opacity)
@@ -114,9 +133,14 @@ enum MetalFramePreparation {
         succeeded = true
         return MetalFrameBatch(passes: builder.passes, pool: resources.groups, loans: builder.loans,
                                pipelines: pipelines, clipBuffer: clipBuffer,
+                               glowWorks: builder.glowWorks,
+                               fastBlurWorks: builder.fastBlurWorks,
+                               mappedTileGlowWorks: builder.mappedTileGlowWorks,
                                pictureWorks: builder.pictureWorks, featherWorks: builder.featherWorks,
                                trackMatteWorks: builder.trackMatteWorks,
                                dropShadowWorks: builder.dropShadowWorks,
+                               gradientOverlayWorks: builder.gradientOverlayWorks,
+                               shapeBlurBlendWorks: builder.shapeBlurBlendWorks,
                                textBulgeWorks: builder.textBulgeWorks,
                                pictureStore: pictures,
                                pictureMisses: builder.pictureMisses)
@@ -138,21 +162,35 @@ enum MetalFramePreparation {
         throw PAGError.renderingFailure("metalUnbalancedMask")
     }
 
-    /// 找到唯一源/拥有者分界与作用域终点；未实现嵌套不能漏画成普通根命令。
+    /// 按每层源/拥有者分界配对轨道遮罩；只返回当前层的边界供局部批次递归处理。
     private static func trackMatteRange(in commands: [FrameCommand], after begin: Int)
         throws -> (separator: Int, end: Int) {
         var separator: Int?
+        var sourceEnded = [false]
         for index in (begin + 1)..<commands.count {
             try Task.checkCancellation()
             switch commands[index] {
             case .beginTrackMatte:
-                throw PAGError.unsupportedFeature("nestedTrackMatte")
+                // 每层拥有者只能在自己的源结束后绘制；深度上限阻止损坏计划耗尽递归栈。
+                guard sourceEnded.count < 32 else {
+                    throw PAGError.resourceLimitExceeded("maximumTrackMatteDepth")
+                }
+                sourceEnded.append(false)
             case .endTrackMatteSource:
-                guard separator == nil else { throw PAGError.renderingFailure("metalUnbalancedTrackMatte") }
-                separator = index
+                guard sourceEnded.last == false else {
+                    throw PAGError.renderingFailure("metalUnbalancedTrackMatte")
+                }
+                sourceEnded[sourceEnded.count - 1] = true
+                if sourceEnded.count == 1 { separator = index }
             case .endTrackMatte:
-                guard let separator else { throw PAGError.renderingFailure("metalUnbalancedTrackMatte") }
-                return (separator, index)
+                guard sourceEnded.last == true else {
+                    throw PAGError.renderingFailure("metalUnbalancedTrackMatte")
+                }
+                sourceEnded.removeLast()
+                if sourceEnded.isEmpty {
+                    guard let separator else { throw PAGError.renderingFailure("metalUnbalancedTrackMatte") }
+                    return (separator, index)
+                }
             default: break
             }
         }
@@ -173,5 +211,35 @@ enum MetalFramePreparation {
             }
         }
         throw PAGError.renderingFailure("metalUnbalancedDropShadow")
+    }
+
+    /// 定位单层渐变叠加终点；嵌套同类样式须由独立合成合同决定后再开放。
+    private static func gradientOverlayEnd(in commands: [FrameCommand], after begin: Int) throws -> Int {
+        for index in (begin + 1)..<commands.count {
+            try Task.checkCancellation()
+            switch commands[index] {
+            case .beginGradientOverlay:
+                throw PAGError.unsupportedFeature("nestedGradientOverlay")
+            case .endGradientOverlay:
+                return index
+            default: break
+            }
+        }
+        throw PAGError.renderingFailure("metalUnbalancedGradientOverlay")
+    }
+
+    /// Shape FastBlur→HardLight只有单层边界可用；嵌套待独立坐标与背景合同。
+    private static func shapeBlurBlendEnd(in commands: [FrameCommand], after begin: Int) throws -> Int {
+        for index in (begin + 1)..<commands.count {
+            try Task.checkCancellation()
+            switch commands[index] {
+            case .beginShapeBlurBlend:
+                throw PAGError.unsupportedFeature("nestedShapeBlurBlend")
+            case .endShapeBlurBlend:
+                return index
+            default: break
+            }
+        }
+        throw PAGError.renderingFailure("metalUnbalancedShapeBlurBlend")
     }
 }
