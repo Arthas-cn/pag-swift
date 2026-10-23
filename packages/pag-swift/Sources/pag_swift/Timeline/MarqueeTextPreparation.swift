@@ -1,4 +1,4 @@
-/// 跑马灯只在原字号单行宽度超框时换用不缩字的准备资源，未溢出继续原PAG框排版。
+/// 跑马灯优先原字号单行排版，轮廓超高时等比适配；只有宽度仍超框才滚动。
 enum MarqueeTextPreparation {
     /// 返回实际文本资源与超框宽度；nil宽度表示放得下，不应额外滚动。
     static func prepare(_ source: SourceText, reference: SourceLayerReference,
@@ -13,8 +13,9 @@ enum MarqueeTextPreparation {
         }
         // 点文本不执行框内自动缩字号；左对齐基线之后在帧计划中回到原文本框位置。
         let unbounded = pointSource(source)
-        let candidate = try TextPreparation.prepare(unbounded, reference: reference,
+        let raw = try TextPreparation.prepare(unbounded, reference: reference,
             style: style, budget: &budget)
+        let candidate = try TextInkFitting.fit(raw, in: source, pointBaseline: source.firstBaseline, budget: &budget)
         let width = Double(candidate.layout.lines.first?.advance ?? 0)
         guard width.isFinite, width >= 0 else {
             throw PAGError.unsupportedFeature("marqueeTextWidth")
@@ -22,8 +23,7 @@ enum MarqueeTextPreparation {
         if width > source.boxSize.x {
             return (candidate, width)
         }
-        return (try TextPreparation.prepare(source, reference: reference,
-            style: style, budget: &budget), nil)
+        return (try TextInkFitting.placePointText(candidate, in: source, budget: &budget), nil)
     }
 
     /// 溢出时供静态排版和动态字距共用的左对齐点文本参数，避免两阶段采用不同对齐原点。

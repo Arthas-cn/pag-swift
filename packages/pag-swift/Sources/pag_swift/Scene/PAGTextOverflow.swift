@@ -4,7 +4,7 @@ public enum PAGTextOverflow: Sendable, Hashable {
     case clip
     /// 单行超框时按真实字体测宽并以省略号收尾；始终裁剪到原文本框。
     case truncate
-    /// 原字号单行超出框宽时按播放器辅助时间水平循环滚动。
+    /// 优先原字号单行滚动；轮廓超框高时等比缩小，再按播放器辅助时间水平循环。
     case marquee(PAGMarqueeOptions)
 }
 

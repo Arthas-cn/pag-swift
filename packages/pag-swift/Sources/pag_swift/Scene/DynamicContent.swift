@@ -6,7 +6,7 @@ public enum DynamicTextLayout: Sendable, Hashable {
     case automatic
     /// 单行按实际字体测宽，超出文本框时在尾部显示省略号。
     case truncate
-    /// 原字号单行超框时滚动；放得下时仍使用原 PAG 排版。
+    /// 优先原字号单行滚动；轮廓超出框高时等比缩小，放得下时保持静止。
     case marquee(PAGMarqueeOptions)
 }
 

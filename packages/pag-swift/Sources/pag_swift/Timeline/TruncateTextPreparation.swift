@@ -13,7 +13,8 @@ enum TruncateTextPreparation {
         let point = MarqueeTextPreparation.pointSource(source)
         let full = try TextPreparation.prepare(point, reference: reference, style: style, budget: &budget)
         if width(of: full) <= source.boxSize.x {
-            return try TextPreparation.prepare(source, reference: reference, style: style, budget: &budget)
+            let fitted = try TextPreparation.prepare(source, reference: reference, style: style, budget: &budget)
+            return try TextInkFitting.fit(fitted, in: source, budget: &budget)
         }
         let characters = Array(style.text)
         var lower = 0
@@ -35,8 +36,9 @@ enum TruncateTextPreparation {
         }
         var result = style
         result.text = best
-        // 省略号比框还宽时仍交给原框裁剪；不把整串超宽文字画回来。
-        return try TextPreparation.prepare(source, reference: reference, style: result, budget: &budget)
+        // 省略号比框还宽时仍只保留省略号；随后按实际轮廓适配，不能恢复整串超宽文字。
+        let fitted = try TextPreparation.prepare(source, reference: reference, style: result, budget: &budget)
+        return try TextInkFitting.fit(fitted, in: source, budget: &budget)
     }
 
     /// 读取同一字形布局的真实单行 advance；空串宽度为零。
