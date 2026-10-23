@@ -2,210 +2,239 @@ import Foundation
 import Observation
 import pag_swift
 
-/// 用户命令与快照桥接；两个播放器消费同一不可变合成，不自行实现播放。
+/// 一份可见资源的宿主会话；内容、调度和 Metal 全部由唯一的库播放器承担。
 @MainActor @Observable final class DemoSession {
-    /// SwiftUI面板独占的库播放器，整个窗口生命周期保持身份不变。
-    let swiftUIPlayer = PAGPlayer()
-    /// 原生面板独占播放器，避免两个宿主争抢同一surface。
-    let nativePlayer = PAGPlayer()
-    /// 载入期间禁止控制旧合成，防止操作与切文件交错。
+    /// 此会话固定的播放器，切换 SwiftUI/原生宿主也不创建另一套播放状态。
+    let player = PAGPlayer()
+    /// 详情或批次的报告身份，批次内各资源复用同一 runID。
+    let runID: UUID
+    /// 当前实际资源，尚未开始载入为 nil。
+    private(set) var resource: DemoResource?
+    /// 当前真实源槽目录，不从图层位置或索引猜测。
+    private(set) var slots: [PAGContentSlot] = []
+    /// 载入和首次 drawable 等待期间为 true。
     private(set) var isLoading = false
-    /// 当前文件是否已安装到两个播放器。
+    /// 成功安装且可操作当前合成。
     private(set) var isLoaded = false
-    /// 最近实际错误；nil表示当前没有载入或播放错误。
+    /// 实际库状态的可读名称，不代表人工画面通过。
+    private(set) var status = "等待预览"
+    /// 根进度的节流快照，范围 0...1。
+    private(set) var progress = 0.0
+    /// 文件逻辑尺寸、时长、帧率的摘要。
+    private(set) var metadata = ""
+    /// 实际根时长秒数，用于批播截止时间。
+    private(set) var duration = 0.0
+    /// 原文件根帧率，尚未解析时为 nil，用于调试逐帧定位。
+    private(set) var frameRate: Double?
+    /// 当前主加载/播放错误，没有错误为 nil。
     private(set) var errorMessage: String?
-    /// SwiftUI播放器的状态与已提交微秒，仅供展示。
-    private(set) var swiftUIStatus = "尚未载入"
-    /// 原生播放器的状态与已提交微秒，仅供展示。
-    private(set) var nativeStatus = "尚未载入"
-    /// 当前载入身份；旧task不能回写新文件的界面状态。
-    @ObservationIgnored private var loadID = UUID()
-    /// 持有控制任务，连续命令取消并等待旧命令退出。
+    /// 与当前文件对应的加载报告。
+    private(set) var loadReport: PAGLoadReport?
+    /// 每 250ms 更新一次的真实帧诊断，尚未安装为 nil。
+    private(set) var diagnostics: PAGPlaybackDiagnostics?
+    /// 控制状态与根位置的原始快照，不能用 GPU 完成位置冒充实际显示位置。
+    private(set) var playback: PAGPlaybackSnapshot?
+    /// 共享 PAG 解析缓存的当前占用；不同于当前文件载入结束时的历史快照。
+    private(set) var cacheStatistics: PAGCacheStatistics?
+    /// 当前进程的真实构建和系统信息，详情与导出使用相同来源。
+    let environment = DemoEnvironment.current()
+    /// 库最近的有限内容事件；异步单槽错误不会变成主播放失败。
+    private(set) var contentEvents: [PAGContentEvent] = []
+    /// 最后 128 条实际宿主操作。
+    private(set) var actions: [DemoLogEntry] = []
+    /// 成功导出的绝对 URL；失败时不更新为不存在的文件。
+    private(set) var reportURL: URL?
+    /// 单会话的串行交互任务，退出页面时必须取消并等待。
     @ObservationIgnored private var command: Task<Void, Never>?
 
-    /// 取消尚未完成的控制，不留下无主命令。
+    /// 预览/详情默认独立 runID；批播可显式注入共同身份。
+    init(runID: UUID = UUID()) { self.runID = runID }
+
+    /// 正常退出由 shutdown 排空；销毁时仍撤销尚未开始的用户命令。
     isolated deinit { command?.cancel() }
 
-    /// SwiftUI的task(id:)提供取消；只给选中的图片槽安装素材，文字走类型化tag入口。
-    func load(_ path: String, media: DemoMediaChoice, imageSlot: Int,
-              dynamicText: String, textLayout: DemoTextLayout) async {
-        let id = UUID()
-        loadID = id
+    /// 与视图 task 同生共死：载入和低频监控并行，取消后排空资源再返回。
+    func run(_ resource: DemoResource, repeatCount: Int = 0) async {
+        async let loading: Void = loadForDisplay(resource, repeatCount: repeatCount)
+        await monitor()
+        _ = await loading
+        await shutdown()
+    }
+
+    /// 页面载入错误已由 load 固化到 UI；结构化子任务不重复吞掉未记录的失败。
+    private func loadForDisplay(_ resource: DemoResource, repeatCount: Int) async {
+        do { try await load(resource, repeatCount: repeatCount) }
+        catch { /* 保留 load 中的错误与取消记录，父任务统一释放资源。 */ }
+    }
+
+    /// 加载真实 PAG 并等待首个 GPU 完成再自动播放；没有可见目标时超时明确报错。
+    func load(_ resource: DemoResource, repeatCount: Int = 0,
+              policy: PAGLoadPolicy = .useCache, autoplay: Bool = true) async throws {
+        let started = Date()
+        self.resource = resource
         isLoading = true
         isLoaded = false
         errorMessage = nil
-        command?.cancel()
-        await command?.value
-        defer { if loadID == id { isLoading = false } }
+        slots = []
+        metadata = ""
+        frameRate = nil
+        loadReport = nil
+        diagnostics = nil
+        playback = nil
+        contentEvents = []
+        actions = []
+        progress = 0
+        reportURL = nil
+        status = "载入中"
+        append("load", detail: "\(resource.id) · \(policy) · repeat=\(repeatCount)")
+        defer { isLoading = false }
         do {
+            await player.cancelContentRequests()
+            await player.pause()
+            try await player.setComposition(nil)
+            let result = try await PAGLoader.shared.loadWithReport(from: resource.url, policy: policy)
+            loadReport = result.report
             try Task.checkCancellation()
-            guard let resources = Bundle.main.resourceURL?.appending(path: "PAGSamples/resources") else {
-                throw PAGError.invalidArgument("demo resources")
-            }
-            let file = try await PAGLoader.shared.load(from: resources.appending(path: path))
-            var composition = file.composition
-            if media != .original, let index = file.editableImageIndices.contains(imageSlot) ?
-                imageSlot : file.editableImageIndices.first {
-                let imageURL: URL
-                switch media {
-                case .original: throw PAGError.invalidArgument("demoMedia")
-                case .png: imageURL = resources.appending(path: "media/rgba-corners.png")
-                case .gif: imageURL = resources.appending(path: "media/bear.gif")
-                case .webp: imageURL = resources.appending(path: "media/webp01.webp")
-                case .video: imageURL = resources.appending(path: "game.mp4")
-                }
-                let placeholder = media == .video ?
-                    try await PAGImage.load(from: resources.appending(path: "media/rgba-corners.png")) : nil
-                // 同一 PAG 中的三个图层有不同位置和尺寸；全槽替换会叠出多个大小不同的画面。
-                let targets = file.composition.layers.filter { $0.editableIndex == index && $0.kind == .image }
-                if let tag = targets.first?.name, !tag.isEmpty,
-                   file.composition.layers(named: tag).filter({ $0.kind == .image }).count == targets.count {
-                    try await composition.apply(.imageURL(imageURL), forTag: tag) { url in
-                        if media == .video { return try await PAGImage.loadVideo(from: url) }
-                        return try await PAGImage.load(from: url)
-                    }
-                } else {
-                    let image = media == .video ? try await PAGImage.loadVideo(from: imageURL) :
-                        try await PAGImage.load(from: imageURL)
-                    try composition.replaceImage(image, at: index)
-                }
-                if path == "editing/ImageDecodeTest.pag" || path == "editing/replace.pag" {
-                    // 两份编辑夹具的图片层相互重叠；验收当前槽时隐藏其它层，避免原图盖住动图。
-                    for layer in file.composition.layers where layer.kind == .image && layer.editableIndex != index {
-                        try composition.setVisibility(false, for: layer.id)
-                    }
-                }
-                if let placeholder { try composition.setPlaceholder(placeholder, at: index) }
-            }
-            if !dynamicText.isEmpty, let index = file.editableTextIndices.first {
-                let name = file.composition.layers.first(where: {
-                    $0.editableIndex == index && $0.kind == .text
-                })?.name ?? ""
-                let tag = name.isEmpty ? "text:\(index)" : name
-                let layout: DynamicTextLayout = switch textLayout {
-                case .original: .automatic
-                case .automatic: .automatic
-                case .truncate: .truncate
-                case .marquee: .marquee(try PAGMarqueeOptions(speed: 45, gap: 24))
-                }
-                if textLayout != .original {
-                    try await composition.apply(.text(dynamicText, layout: layout), forTag: tag)
-                }
-            }
-            for player in [swiftUIPlayer, nativePlayer] {
+            let composition = result.file.composition
+            slots = result.file.contentSlots
+            duration = Double(composition.duration.microseconds) / 1_000_000
+            frameRate = composition.frameRate
+            metadata = "\(Int(composition.size.width)) × \(Int(composition.size.height)) · " +
+                String(format: "%.2fs · %.1f fps", duration, composition.frameRate)
+            try await player.setComposition(composition)
+            await player.setRepeatCount(repeatCount)
+            // 业务默认不提供覆盖；库自行发现源槽并且每个槽只调用一次。
+            try await player.setContentProvider { _ in .unchanged }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+            while await player.snapshot.presentedTime == nil {
                 try Task.checkCancellation()
-                try await player.setComposition(composition)
-                await player.setRepeatCount(0)
+                if let failure = await player.snapshot.failure { throw failure }
+                guard ContinuousClock.now < deadline else { throw PAGError.renderingFailure("demoFirstDrawableTimeout") }
+                try await Task.sleep(for: .milliseconds(25))
             }
-            try Task.checkCancellation()
-            if loadID == id { isLoaded = true }
+            if autoplay { try await player.play() }
+            isLoaded = true
+            append(autoplay ? "play" : "prepared", detail: "repeat=\(repeatCount)")
+            await refresh()
         } catch is CancellationError {
-            // 切文件或离开界面是正常取消，旧任务不能污染新选择。
+            append("cancel", detail: "资源载入被页面生命周期撤销")
+            throw CancellationError()
         } catch {
-            if loadID == id { errorMessage = String(describing: error) }
+            errorMessage = String(describing: error)
+            status = "失败"
+            if loadReport == nil {
+                loadReport = await PAGLoader.shared.recentReports.last {
+                    $0.sourcePath == resource.url.path && $0.startedAt >= started
+                }
+            }
+            append("error", detail: String(describing: error))
+            throw error
         }
     }
 
-    /// 两个有界快照流由调用方task共同拥有，视图取消后订阅一起结束。
-    func observe() async {
-        async let first: Void = observe(swiftUIPlayer, isNative: false)
-        async let second: Void = observe(nativePlayer, isNative: true)
-        _ = await (first, second)
+    /// UI 汇总节流为每秒四次，库播放仍使用平台显示时钟，不在此推进时间。
+    func monitor() async {
+        while !Task.isCancelled {
+            await refresh()
+            do { try await Task.sleep(for: .milliseconds(250)) }
+            catch { return }
+        }
     }
 
-    /// 串行发送最新用户命令；旧命令实际退出后才开始新命令。
-    func perform(_ action: DemoCommand) {
+    /// 刷新真实库快照与有界事件，主错误优先保留，避免被 empty 覆盖失败原因。
+    func refresh() async {
+        let snapshot = await player.snapshot
+        if playback?.state != snapshot.state {
+            append("state", detail: String(describing: snapshot.state))
+        }
+        playback = snapshot
+        cacheStatistics = await PAGLoader.shared.statistics
+        if !isLoading { isLoaded = snapshot.duration != nil && snapshot.failure == nil }
+        if errorMessage == nil { status = isLoading ? "载入中" : String(describing: snapshot.state) }
+        if let failure = snapshot.failure { errorMessage = String(describing: failure); status = "失败" }
+        if let duration = snapshot.duration, duration.microseconds > 0 {
+            progress = min(1, max(0, Double(snapshot.position.microseconds) / Double(duration.microseconds)))
+        }
+        let current = await player.diagnostics
+        // 清屏也有 GPU 完成；没有匹配的文件摘要时，不能把清屏报告成该候选渲染成功。
+        diagnostics = current?.documentIdentity != nil && current?.documentIdentity == loadReport?.documentIdentity ? current : nil
+        contentEvents = await player.contentEvents.filter { $0.documentIdentity == loadReport?.documentIdentity }
+    }
+
+    /// 视图取消后的清理不继承其取消状态；等待有限拥有任务退出后释放合成及显示预约。
+    func shutdown() async {
+        command?.cancel()
+        await command?.value
+        command = nil
+        let player = player
+        await Task {
+            await player.cancelContentRequests()
+            await player.pause()
+            try? await player.setComposition(nil)
+            await player.detachSurface()
+        }.value
+        isLoaded = false
+    }
+
+    /// 用户命令串行替换前一条；当前命令结束后才执行新命令，错误留在有限日志中。
+    func perform(_ operation: String, tag: String? = nil, detail: String = "",
+                 action: @escaping @MainActor (PAGPlayer) async throws -> Void) {
+        append(operation, tag: tag, detail: detail)
         let previous = command
         previous?.cancel()
         command = Task { [weak self] in
             await previous?.value
             guard let self, !Task.isCancelled else { return }
-            do {
-                for player in [swiftUIPlayer, nativePlayer] {
-                    try Task.checkCancellation()
-                    switch action {
-                    case .play: try await player.play()
-                    case .pause: await player.pause()
-                    case .rewind: try await player.rewind()
-                    case .seek(let progress): try await player.seek(to: PAGProgress(progress))
-                    case .scale(let mode): await player.setScaleMode(mode)
-                    }
-                }
-            } catch is CancellationError {
-                // 下一条交互已取代当前命令，不把它变成播放失败。
-            } catch { errorMessage = String(describing: error) }
+            do { try await action(player); await refresh() }
+            catch is CancellationError { /* 已由更新交互取代，不能当主错误显示。 */ }
+            catch { append("operationFailed", tag: tag, detail: String(describing: error)) }
         }
     }
 
-    /// 格式化实际快照，不通过观察回调seek或推进时钟。
-    private func observe(_ player: PAGPlayer, isNative: Bool) async {
-        for await snapshot in await player.snapshots() {
-            guard !Task.isCancelled else { return }
-            let time = snapshot.presentedTime.map { "\($0.microseconds) μs" } ?? "等待首帧"
-            let text = "\(snapshot.state) · \(time)"
-            if isNative { nativeStatus = text } else { swiftUIStatus = text }
-            if let failure = snapshot.failure { errorMessage = String(describing: failure) }
+    /// 只保留可读参数，不向控制台或磁盘逐帧输出。
+    func append(_ operation: String, tag: String? = nil, detail: String) {
+        actions.append(DemoLogEntry(operation: operation, tag: tag, detail: detail))
+        if actions.count > 128 { actions.removeFirst(actions.count - 128) }
+    }
+
+    /// 从真实库状态固化报告；默认人工画面仍为 pending，不能自动写 PASS。
+    func report(endReason: String, error: String? = nil) async -> DemoResourceReport? {
+        guard let resource else { return nil }
+        await refresh()
+        let snapshot = await player.snapshot
+        return DemoResourceReport(runID: runID, resource: resource, environment: .current(),
+            endReason: endReason, parsing: loadReport?.status.rawValue ?? "unavailable",
+            rendering: (diagnostics?.gpuCompletedFrames ?? 0) > 0 ? "completed" : "unavailable",
+            playback: snapshot.state == .finished ? "finished" : String(describing: snapshot.state),
+            visual: "pending", load: loadReport, diagnostics: diagnostics,
+            contentEvents: contentEvents, actions: actions, error: error ?? errorMessage)
+    }
+
+    /// 显式导出快照到可分享 JSON，显示实际文件路径，写入失败留操作错误。
+    func export() {
+        perform("export") { [weak self] _ in
+            guard let self, let report = await report(endReason: "manualExport") else { return }
+            reportURL = try await DemoReportStore.save(report, runID: runID, name: "detail")
         }
     }
-}
 
-/// Demo 逐项展示动态文本合同，原始选项不替换 PAG 源文字。
-enum DemoTextLayout: String, CaseIterable, Hashable {
-    /// 不编辑文字或附加溢出行为。
-    case original
-    /// 使用源文本框自动字号规则。
-    case automatic
-    /// 单行超框时显示省略号。
-    case truncate
-    /// 原字号超框时在文本框内滚动。
-    case marquee
-
-    /// 选择器中向用户解释实际呈现行为。
-    var title: String {
-        switch self {
-        case .original: "原始文字"
-        case .automatic: "自动字号"
-        case .truncate: "尾部截断"
-        case .marquee: "跑马灯"
+    /// 从当前资源重新准备或播放；保留总轮数配置，明确区分缓存复用与强制重新解析。
+    func reload(policy: PAGLoadPolicy = .useCache, autoplay: Bool = true) {
+        guard let resource else { return }
+        perform(autoplay ? "reload" : "prepare", detail: String(describing: policy)) { [weak self] player in
+            let count = await player.snapshot.repeatCount
+            try await self?.load(resource, repeatCount: count, policy: policy, autoplay: autoplay)
         }
     }
-}
 
-/// 现有Demo的单一图片槽替换来源；两个宿主始终消费同一选择。
-enum DemoMediaChoice: String, CaseIterable, Hashable, Sendable {
-    /// 使用原始PAG内嵌素材。
-    case original
-    /// 使用静态PNG核对单帧替换。
-    case png
-    /// 使用多帧GIF核对逐帧显示。
-    case gif
-    /// 使用动画WebP核对系统逐帧能力。
-    case webp
-    /// 使用静音MP4核对系统NV12输入与占位。
-    case video
-
-    /// 供同一个样例选择器显示的中文名称。
-    var title: String {
-        switch self {
-        case .original: "原始素材"
-        case .png: "静态 PNG"
-        case .gif: "动画 GIF"
-        case .webp: "动画 WebP"
-        case .video: "MP4 视频"
+    /// 逐帧调试先暂停，再用文件帧率计算相邻根时刻；这不会定位独立 GIF/WebP 的进度。
+    func stepFrame(_ direction: Int) {
+        guard let frameRate else { return }
+        perform("stepFrame", detail: String(direction)) { player in
+            await player.pause()
+            let current = await player.snapshot.position.microseconds
+            let delta = Int64((1_000_000 / frameRate).rounded()) * Int64(direction)
+            try await player.seek(to: PAGTime(microseconds: max(0, current + delta)))
         }
     }
-}
-
-/// 演示支持的用户操作；参数是库已经验证或将验证的小值。
-enum DemoCommand: Sendable {
-    /// 恢复当前位置的播放意图。
-    case play
-    /// 暂停并保留当前位置。
-    case pause
-    /// 回到第一帧并清零完成次数。
-    case rewind
-    /// 请求0...1的根进度，越界由库报告错误。
-    case seek(Double)
-    /// 改变合成到显示区域的缩放模式。
-    case scale(PAGScaleMode)
 }

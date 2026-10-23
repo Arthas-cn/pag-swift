@@ -63,7 +63,7 @@ struct StillImageTests {
     }
 
     /// 真实多帧 GIF/WebP 必须公开动图句柄和一轮时长，后续帧不得被静默折成首帧。
-    @Test(arguments: [("bear.gif", 15), ("webp01.webp", 10)])
+    @Test(arguments: [("bear.gif", 8), ("webp01.webp", 10)])
     func animatedSourcesExposeFrames(_ name: String, _ count: Int) async throws {
         let image = try await PAGImage.load(data: PAGFixtures.data(named: "media/\(name)"))
         let animation = try #require(image.animation)

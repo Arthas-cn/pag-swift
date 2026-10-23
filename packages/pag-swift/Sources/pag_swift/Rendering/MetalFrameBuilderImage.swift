@@ -12,6 +12,16 @@ extension MetalFrameBuilder {
             throw PAGError.unsupportedFeature("motionBlurImageMaterial")
         }
         let texture = try resources.image(image, budget: &budget)
+        let slotMask: MetalSlotMaskInput?
+        if let mask = value.slotMask {
+            guard let input = frame.images[mask.resourceID], input.size == mask.pixelSize,
+                  value.motionTile == nil, value.motionBlur == nil,
+                  value.bulge == nil, value.cornerPin == nil else {
+                throw PAGError.unsupportedFeature("slotMaskImageMaterial")
+            }
+            slotMask = MetalSlotMaskInput(texture: try resources.image(input, budget: &budget),
+                                          uniforms: try MetalSlotMaskUniforms(mask))
+        } else { slotMask = nil }
         let mesh = try resources.rectangle(budget: &budget)
         let matrix: SceneAffine
         if value.cornerPin != nil {
@@ -49,6 +59,7 @@ extension MetalFrameBuilder {
         if let clip = value.clip { try localClips.append(clip) }
         let alpha = try MetalDrawUniforms.premultiplied(red: 1, green: 1, blue: 1, alpha: value.opacity)
         try append(mesh: mesh, texture: texture, matrix: matrix, color: alpha,
-            clips: localClips, motionTile: tile, bulge: bulge, cornerPin: corner, motionBlur: blur)
+            clips: localClips, motionTile: tile, bulge: bulge, cornerPin: corner, motionBlur: blur,
+            slotMask: slotMask)
     }
 }

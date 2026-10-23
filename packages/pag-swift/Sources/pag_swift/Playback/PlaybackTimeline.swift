@@ -20,6 +20,8 @@ struct PlaybackTimeline: Sendable {
     private(set) var completedIterations: UInt64 = 0
     /// 可见且主动播放的累计微秒，seek/根循环不回拨，暂停/隐藏不增长。
     private(set) var activeElapsed: UInt64 = 0
+    /// 独立动图累计播放微秒；与 activeElapsed 一同推进，但 seek、根循环和 rewind 都不清零。
+    private(set) var imageElapsed: UInt64 = 0
     /// 总次数而非额外重复次数；默认完整播放一次。
     private(set) var repeatCount = 1
     /// 主动播放意图；窗口恢复不能把 false 改成 true。
@@ -42,6 +44,7 @@ struct PlaybackTimeline: Sendable {
         position = .zero
         completedIterations = 0
         activeElapsed = 0
+        imageElapsed = 0
         wantsPlayback = false
         awaitsFinalFrame = false
         failure = nil
@@ -98,9 +101,10 @@ struct PlaybackTimeline: Sendable {
         if duration != nil, state != .failed { state = .paused }
     }
 
-    /// 暂停并回到起点，清零整轮次数；失败场景须先成功安装/替换合成。
-    mutating func rewind() throws {
+    /// 暂停并回到起点，清零根次数但保留动图进度；now 提供时先结算命令前经过时间，失败抛领域错误。
+    mutating func rewind(at now: UInt64? = nil) throws {
         try requireUsableComposition()
+        if let now { creditImageTime(to: now) }
         position = .zero
         completedIterations = 0
         activeElapsed = 0
@@ -115,6 +119,8 @@ struct PlaybackTimeline: Sendable {
     mutating func seek(to time: PAGTime, at now: UInt64) throws {
         try requireUsableComposition()
         guard let duration else { throw PAGError.missingComposition }
+        // seek 改根位置但不改变动图进度；先结算上一 tick 到控制命令之间真实播放的时间。
+        creditImageTime(to: now)
         position = try TimeMapping.clamped(time, duration: duration)
         awaitsFinalFrame = false
         creditedEndpoint = false
@@ -160,6 +166,7 @@ struct PlaybackTimeline: Sendable {
             credited = delta
         }
         activeElapsed = UInt64(min(UInt128(activeElapsed) + credited, UInt128(UInt64.max)))
+        imageElapsed = UInt64(min(UInt128(imageElapsed) + credited, UInt128(UInt64.max)))
         let crossings = elapsed / length
         // 等末帧期间位置停在最后可见微秒，但自然终点已计数；恢复后的首个边界只能消费一次。
         let newCrossings = creditedEndpoint && crossings > 0 ? crossings - 1 : crossings
@@ -186,6 +193,18 @@ struct PlaybackTimeline: Sendable {
         wantsPlayback = false
         anchor = nil
         state = .finished
+    }
+
+    /// 控制根位置前仅结算独立动图；不让 seek 本身消耗 PAG 的循环次数或回拨根时间。
+    private mutating func creditImageTime(to now: UInt64) {
+        guard state == .playing, !awaitsFinalFrame, let anchor, now > anchor, let duration else { return }
+        var credited = UInt128(now - anchor)
+        if repeatCount > 0 {
+            let rounds = UInt128(repeatCount) > UInt128(completedIterations) ? UInt128(repeatCount) - UInt128(completedIterations) : 0
+            let remaining = rounds * UInt128(duration.microseconds)
+            credited = min(credited, remaining > UInt128(position.microseconds) ? remaining - UInt128(position.microseconds) : 0)
+        }
+        imageElapsed = UInt64(min(UInt128(imageElapsed) + credited, UInt128(UInt64.max)))
     }
 
     /// 主工作不可恢复失败时冻结，保留最后接受的位置与次数供诊断。

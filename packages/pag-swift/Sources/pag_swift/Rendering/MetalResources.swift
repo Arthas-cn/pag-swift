@@ -7,7 +7,7 @@ final class MetalResources {
     /// 创建输入buffer、纹理和管线的唯一设备，所有调用在owner执行域。
     private let device: any MTLDevice
     /// GPU输入与其必要保活源的保守留存预算，零表示不缓存。
-    private let byteLimit: Int
+    let byteLimit: Int
     /// 已上传的不可变资源，双向链用值键避免引用环。
     private var entries: [MetalResourceKey: MetalCacheEntry] = [:]
     /// 最近使用的资源，nil表示空缓存。

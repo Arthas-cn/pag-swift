@@ -2,8 +2,12 @@
 actor PreparedShapeStore {
     /// 固定文档中的动态源层模板；数组共享不可变源数据，键不接受其他文档混入。
     private let templates: [SourceLayerReference: [SourceShape]]
-    /// 最多四项缓存的总保守成本；0关闭留存，仍允许当前请求准备。
+    /// 最多64项、每源层最多四项的总保守成本；0关闭留存，仍允许当前请求准备。
     private let maximumBytes: Int
+    /// 限制不同源层与历史采样的总条目数，避免仅依赖字节预算保留大量微小结果。
+    private let maximumEntries = 64
+    /// 每个源层只保留最近四种采样；跨帧复用候选仍为原有的四项上限。
+    private let maximumSamplesPerSource = 4
     /// 从最旧到最新的有限条目；小上限允许线性查找，不引入无界帧历史。
     private var entries: [ShapeSampleEntry] = []
     /// 当前缓存持有结果的保守总成本，不计其他帧独立保活的已淘汰结果。
@@ -32,16 +36,25 @@ actor PreparedShapeStore {
         }
         guard let elements = templates[key.source] else { throw SceneValidator.invalid("missingPreparedShape") }
         var budget = FramePlanBudget(limit: maximumPreparedBytes)
-        // 只借用现有四项LRU中的同源对象；候选数组在分配前计费，失败期间不移动旧条目。
-        try budget.reserve(count: entries.count, stride: 16)
+        // 先按每源上限预付候选数组；其他源层可继续留存，但不能混入本层几何匹配。
+        try budget.reserve(count: min(entries.count, maximumSamplesPerSource), stride: 16)
         let candidates = entries.reversed().compactMap { $0.key.source == key.source ? $0.layer : nil }
         let layer = try ShapePreparation.prepare(elements, at: key.frame, reusing: candidates, budget: &budget)
         try Task.checkCancellation()
         // 超大单条仍可供当前帧使用；不为一个无法留存的结果挤掉所有已有缓存。
         if layer.estimatedBytes <= maximumBytes {
-            while entries.count >= 4 || retainedBytes > maximumBytes - layer.estimatedBytes {
-                let removed = entries.removeFirst()
-                retainedBytes -= removed.layer.estimatedBytes
+            var sameSourceCount = 0
+            var oldestSameSource: Int?
+            for index in entries.indices where entries[index].key.source == key.source {
+                sameSourceCount += 1
+                if oldestSameSource == nil { oldestSameSource = index }
+            }
+            // 先限制本层历史，避免多图层顺序求值时把其它源层仅有的最近结果挤掉。
+            if sameSourceCount >= maximumSamplesPerSource, let oldestSameSource {
+                remove(at: oldestSameSource)
+            }
+            while entries.count >= maximumEntries || retainedBytes > maximumBytes - layer.estimatedBytes {
+                remove(at: 0)
             }
             entries.append(ShapeSampleEntry(key: key, layer: layer))
             retainedBytes += layer.estimatedBytes
@@ -53,6 +66,11 @@ actor PreparedShapeStore {
     func removeAll() {
         entries.removeAll()
         retainedBytes = 0
+    }
+
+    /// 从有限全局 LRU 摘除一个结果并同步计费；调用前下标必须有效。
+    private func remove(at index: Int) {
+        retainedBytes -= entries.remove(at: index).layer.estimatedBytes
     }
 }
 

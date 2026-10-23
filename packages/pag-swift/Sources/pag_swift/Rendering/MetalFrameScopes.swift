@@ -64,6 +64,8 @@ struct MetalPendingDraw {
     let mesh: MetalMesh
     /// 静图或子组结果，nil表示纯色。
     let texture: (any MTLTexture)?
+    /// 业务槽位静态 alpha，不占用原文件普通路径遮罩的两层预算。
+    let slotMask: MetalSlotMaskInput?
     /// 效果最终mask/邻层源表面；仅由已组合内容纹理携带并在片元只乘一次。
     let featherMaskTexture: (any MTLTexture)?
     /// 两平面视频及其CV包装；与texture互斥，组透明度折叠时仍保留整个输入。

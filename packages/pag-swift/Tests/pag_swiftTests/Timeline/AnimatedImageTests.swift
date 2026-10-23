@@ -1,7 +1,7 @@
 import Testing
 @testable import pag_swift
 
-/// 真实GIF/WebP的逐帧像素、循环和图片层内容时间，不用模拟的容器元数据代替解码。
+/// 真实 GIF/WebP 的逐帧像素、循环和独立进度，不用模拟的容器元数据代替解码。
 struct AnimatedImageTests {
     /// 两种真实动图在帧边界取不同RGBA，重复采样复用帧，循环后回到第一帧。
     @Test(arguments: ["bear.gif", "webp01.webp"])
@@ -64,23 +64,23 @@ struct AnimatedImageTests {
         #expect(await store.retainedBytes() == 0)
     }
 
-    /// 图层替换用局部内容时间推进动图，反向seek重现先前纹理身份，旧计划仍保有旧帧。
-    @Test func replacementUsesLayerContentTimeAndSeek() async throws {
+    /// 图层替换用独立累计时间推进动图；PAG 反向 seek 不回拨动图，旧计划仍保有旧帧。
+    @Test func replacementUsesIndependentTimeAcrossRootSeek() async throws {
         let file = try await ImageTimeFixtures.file(rule: nil, start: 0, duration: 30,
             offsets: [0], fileDuration: 30)
         let image = try await PAGImage.load(data: PAGFixtures.data(named: "media/bear.gif"))
         var composition = file.composition
         try composition.replaceImage(image, at: 0)
         let scene = try await PreparedScene.prepare(composition)
-        let first = try await plan(scene, frame: 0)
-        let later = try await plan(scene, frame: 5)
-        let seeked = try await plan(scene, frame: 0)
+        let first = try await plan(scene, frame: 0, imageTime: .zero)
+        let later = try await plan(scene, frame: 5, imageTime: PAGTime(microseconds: 166_666))
+        let seeked = try await plan(scene, frame: 0, imageTime: PAGTime(microseconds: 166_666))
         let firstID = try #require(firstImageID(first))
         let laterID = try #require(firstImageID(later))
         #expect(firstID != laterID)
-        #expect(firstID == firstImageID(seeked))
+        #expect(laterID == firstImageID(seeked))
         #expect(first.images[firstID]?.storage.pixels != later.images[laterID]?.storage.pixels)
-        #expect(first.images[firstID]?.storage.pixels == seeked.images[firstID]?.storage.pixels)
+        #expect(later.images[laterID]?.storage.pixels == seeked.images[laterID]?.storage.pixels)
     }
 
     /// 从完整生产帧计划中读取首个图片命令的输入身份。
@@ -91,10 +91,10 @@ struct AnimatedImageTests {
         return nil
     }
 
-    /// 按根文件真实帧率准备帧，避免测试自己再造一条动图时钟。
-    private func plan(_ scene: PreparedScene, frame: Int64) async throws -> PreparedFrame {
+    /// 分别传根帧位置与已累计的动图时间，避免把两者错误绑定。
+    private func plan(_ scene: PreparedScene, frame: Int64, imageTime: PAGTime) async throws -> PreparedFrame {
         let root = scene.composition.storage.compositions[scene.composition.storage.rootIndex]
         return try await FramePlanner.prepare(scene, at: SceneValidator.time(frame: frame, rate: root.frameRate),
-            targetSize: scene.composition.size, scale: 1, mode: .none)
+            targetSize: scene.composition.size, scale: 1, mode: .none, imageAnimationTime: imageTime)
     }
 }

@@ -6,15 +6,20 @@ struct LoadSnapshot: Sendable {
     let data: Data
     /// 对完整 data 计算的内容身份。
     let identity: DocumentIdentity
+    /// 成功完成稳定文件读取的耗时；内存来源或测试未测量时为 nil。
+    var readSeconds: Double? = nil
+    /// 成功完成全量 SHA-256 的耗时；测试手工快照未测量时为 nil。
+    var digestSeconds: Double? = nil
 
     /// 在并发域检查内存预算并计算摘要，避免哈希阻塞 loader 或 UI actor。
     @concurrent static func prepare(data: Data, limits: PAGLoadLimits) async throws -> LoadSnapshot {
         try Task.checkCancellation()
         guard data.count <= limits.maximumFileBytes else { throw PAGError.resourceLimitExceeded("maximumFileBytes") }
         guard data.count <= limits.maximumDecodedBytes else { throw PAGError.resourceLimitExceeded("maximumDecodedBytes") }
+        let started = ContinuousClock.now
         let identity = try DocumentIdentity(data: data)
         try Task.checkCancellation()
-        return LoadSnapshot(data: data, identity: identity)
+        return LoadSnapshot(data: data, identity: identity, digestSeconds: loadElapsed(since: started))
     }
 }
 

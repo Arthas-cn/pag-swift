@@ -6,6 +6,10 @@ struct CompositionEdits: Sendable {
     var texts: [Int: PAGText] = [:]
     /// 每个图像实例当前唯一替换；删除键恢复原始素材，不恢复历史覆盖。
     var images: [PAGLayerID: PAGImage] = [:]
+    /// 按 tag 替换时显式选择的图片适配；缺失继续使用 PAG 文件规则。
+    var imageScaleModes: [PAGLayerID: PAGScaleMode] = [:]
+    /// 替换内容独占的静态 alpha 遮罩；来源槽仍保有自己的图层职责。
+    var imageMasks: [PAGLayerID: PreparedImageMask] = [:]
     /// 每个图像实例的视频待帧占位；只有正常图片素材可作为占位。
     var placeholders: [PAGLayerID: PAGImage] = [:]
     /// 可编辑文本槽的附加溢出策略，缺失时完整保留PAG原始排版。
@@ -72,7 +76,7 @@ extension PAGComposition {
         edits.textOverflows[index] = overflow
     }
 
-    /// 替换允许图片槽关联的全部实例；nil 删除当前覆盖，恢复各层的原始资源。
+    /// 替换允许图片槽关联的全部实例，并清除先前 tag 的遮罩/适配选项；nil 恢复原始资源。
     public mutating func replaceImage(_ image: PAGImage?, at index: Int) throws {
         guard storage.catalog.imageSet.contains(index) else { throw PAGError.invalidEditableIndex(index) }
         for instance in storage.instances {
@@ -80,16 +84,22 @@ extension PAGComposition {
             let source = storage.compositions[instance.compositionIndex].layers[instance.layerIndex]
             if case .image = source.content, storage.catalog.slots[reference] == index {
                 edits.images[instance.id] = image
+                edits.imageMasks[instance.id] = nil
+                edits.imageScaleModes[instance.id] = nil
             }
         }
     }
 
-    /// 替换所有名称精确匹配的图像实例；零匹配抛 noMatchingImageLayer，不影响同名其他层。
+    /// 替换同名图像并清除其遮罩/适配选项；零匹配抛 noMatchingImageLayer，不影响同名其他层。
     public mutating func replaceImage(_ image: PAGImage?, named name: String) throws {
         let matches = layers(named: name).filter { $0.kind == .image }.map(\.id)
         guard !matches.isEmpty else { throw PAGError.noMatchingImageLayer(name) }
         // 先找到完整集合再提交，避免中途失败只改了一部分；nil 同样表示恢复原图。
-        for id in matches { edits.images[id] = image }
+        for id in matches {
+            edits.images[id] = image
+            edits.imageMasks[id] = nil
+            edits.imageScaleModes[id] = nil
+        }
     }
 
     /// 为允许编辑的图片槽全部实例设置或清除占位；视频不能作为等待另一段视频的占位。

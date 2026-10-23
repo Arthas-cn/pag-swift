@@ -5,25 +5,31 @@ enum FramePlanner {
                                      targetSize: PAGSize, scale: Double, mode: PAGScaleMode,
                                      maximumBytes: Int = 64 * 1024 * 1024,
                                      isPlaying: Bool = false,
-                                     auxiliaryTime: PAGTime = .zero) async throws -> PreparedFrame {
+                                     auxiliaryTime: PAGTime = .zero,
+                                     imageAnimationTime: PAGTime = .zero,
+                                     waitsForAnimatedImages: Bool = true) async throws -> PreparedFrame {
         try Task.checkCancellation()
         guard maximumBytes > 0 else { throw PAGError.invalidArgument("maximumFramePlanBytes") }
         let composition = scene.composition
+        if !waitsForAnimatedImages {
+            try await scene.animatedImages?.retainMaterials(scene.animatedMaterialIDs, isPlaying: isPlaying)
+        }
         let sample = try SceneTiming.root(at: time, in: composition.storage)
         let display = try DisplayTransform(contentSize: composition.size, targetSize: targetSize, scale: scale, mode: mode)
         var builder = FramePlanBuilder(scene: scene, time: sample, display: display,
                                        budget: FramePlanBudget(limit: maximumBytes), isPlaying: isPlaying,
-                                       auxiliaryTime: auxiliaryTime)
+                                       auxiliaryTime: auxiliaryTime, imageAnimationTime: imageAnimationTime,
+                                       waitsForAnimatedImages: waitsForAnimatedImages)
         return try await builder.build()
     }
 }
 
 /// 一次调用独占的计划构建状态；所有增长在预算检查后执行，不进入公开场景快照。
-private struct FramePlanBuilder {
+struct FramePlanBuilder {
     /// 此次安装的不可变准备结果，几何和快照属于同一文档。
     let scene: PreparedScene
     /// 此次编辑快照，O(1) 共享源资源和覆盖表。
-    private var composition: PAGComposition { scene.composition }
+    var composition: PAGComposition { scene.composition }
     /// 已完成根量化的采样时刻。
     let time: RootSampleTime
     /// 根逻辑坐标到目标像素的共同显示变换。
@@ -35,37 +41,44 @@ private struct FramePlanBuilder {
     /// 已发出的实际图元数；空Vector候选不能形成可选快照范围。
     private var primitiveCount = 0
     /// 当前计划使用的输入保活表，不持有 GPU 或 ImageIO 对象。
-    private var images: [DocumentIdentity: PAGImage] = [:]
+    var images: [DocumentIdentity: PAGImage] = [:]
     /// 当前计划需要的共享几何对象，按源身份去重，不复制其轮廓。
     private var shapes: [ShapeGeometryID: ShapeGeometry] = [:]
-    /// 本次计划已取得的动态源帧，防止owner四条LRU淘汰后同一帧表又重建相同采样。
+    /// 本次计划已取得的动态源帧，防止owner同源四帧上限淘汰后又重建相同采样。
     private var shapeSamples: [ShapeSampleKey: PreparedShapeLayer] = [:]
     /// 本次计划需要的文本资源；按准备代数去重，不在每帧重新整形。
     private var texts: [TextResourceID: PreparedTextLayer] = [:]
     /// 同一帧计划中的路径文字展开实例共享完成的逐帧矩阵，不能跨帧复用位置。
     private var textSamples: [TextSampleKey: PreparedTextLayer] = [:]
     /// 按实际PTS去重的输入交接槽；内部锁只交换引用，裸CV帧不进入构建器。
-    private var videos: [VideoFrameID: VideoFrameTransfer] = [:]
+    var videos: [VideoFrameID: VideoFrameTransfer] = [:]
     /// 仅主动播放允许外部视频从正在推进的系统输出取相邻帧。
-    private let isPlaying: Bool
+    let isPlaying: Bool
     /// 当前播放器实际累计播放微秒，不因PAG根循环或普通seek回拨。
-    private let auxiliaryTime: PAGTime
-    /// 本次计划实际选择的占位实例；只有有效GPU完成后才建立其起点。
-    private var placeholderIDs: [PAGLayerID] = []
-    /// 本次计划实际绘制且处于播放状态的滚动文字；提交后才建立辅助时间起点。
+    let auxiliaryTime: PAGTime
+    /// 已排除暂停和宿主挂起的动图累计播放时间，独立于根帧以及跑马灯的回卷重置。
+    let imageAnimationTime: PAGTime
+    /// 精确计划可等待目标帧；实时显示为 false，缺帧沿用已有输入，不阻塞整帧提交。
+    let waitsForAnimatedImages: Bool
+    /// 本次计划实际选择的占位实例；只有实际有效呈现后才建立其起点。
+    var placeholderIDs: [PAGLayerID] = []
+    /// 本次计划实际绘制且处于播放状态的滚动文字；实际有效呈现后才建立辅助时间起点。
     private var marqueeIDs: [PAGLayerID] = []
     /// 显式预合成遍历栈，避免深场景的递归调用栈增长。
     private var stack: [PlanningContext] = []
 
     /// 接受经验证的快照、请求和显示变换；初始不分配逐层工作数组。
     init(scene: PreparedScene, time: RootSampleTime, display: DisplayTransform,
-         budget: FramePlanBudget, isPlaying: Bool, auxiliaryTime: PAGTime) {
+         budget: FramePlanBudget, isPlaying: Bool, auxiliaryTime: PAGTime, imageAnimationTime: PAGTime,
+         waitsForAnimatedImages: Bool) {
         self.scene = scene
         self.time = time
         self.display = display
         self.budget = budget
         self.isPlaying = isPlaying
         self.auxiliaryTime = auxiliaryTime
+        self.imageAnimationTime = imageAnimationTime
+        self.waitsForAnimatedImages = waitsForAnimatedImages
     }
 
     /// 完整迭代所有可见实例并生成命令；任何失败丢弃 builder，调用方收不到部分内容。
@@ -336,200 +349,6 @@ private struct FramePlanBuilder {
                                      isTrackMatteScope: false))
     }
 
-    /// 先计输入预算再请求后台硬解；同PTS实例共享槽，不同时间不能互相覆盖输入。
-    private mutating func sampleVideo(_ video: SourceVideoComposition, source: SourceComposition, frame: Int64,
-                                      matrix: SceneAffine, layerID: PAGLayerID?) async throws {
-        guard let sequence = video.sequences.last, let store = scene.videos else {
-            throw SceneValidator.invalid("missingPreparedVideo")
-        }
-        let logical = try video.frame(at: frame, frameRate: source.frameRate)
-        let actual = sequence.samples[sequence.sampleIndex(at: logical)].frame
-        let identity = VideoFrameID(sequence: sequence.identity, frame: actual)
-        let input: VideoFrameTransfer
-        if let existing = videos[identity] { input = existing }
-        else {
-            let estimate = Int(sequence.decodedSize.width) * Int(sequence.decodedSize.height) * 3 / 2
-            try budget.reserve(stride: estimate + 256)
-            input = try await store.frame(for: sequence, at: logical)
-            try Task.checkCancellation()
-            guard input.identity == identity else { throw PAGError.mediaFailure("videoPlanFrameIdentity") }
-            if input.byteCount > estimate { try budget.reserve(stride: input.byteCount - estimate) }
-            videos[identity] = input
-        }
-        let local = try SceneAffine.scale(x: source.size.width / input.size.width, y: source.size.height / input.size.height)
-        try append(.video(FrameVideo(layerID: layerID, resourceID: identity, pixelSize: input.size,
-                                      matrix: local.following(matrix), opacity: 1)))
-    }
-
-    /// 建立图像像素布局并去重保活输入；原图与替换适配的差别在这里一次确定。
-    private mutating func image(resourceID: UInt32, instance: LayerInstance, matrix: SceneAffine,
-                                opacity: Double, contentTime: PAGTime,
-                                motionTile: SampledMotionTile?, motionBlur: MotionBlurSampling?,
-                                bulge: SampledBulge?,
-                                cornerPin: SampledCornerPin?) async throws {
-        guard let source = composition.storage.resources.images[resourceID] else {
-            throw SceneValidator.invalid("missingImageReference")
-        }
-        let replacement = composition.edits.images[instance.id]
-        let input = replacement ?? source.image
-        let local: SceneAffine
-        let clip: FrameClip?
-        let sampleTime: PAGTime
-        if let replacement {
-            let reference = SourceLayerReference(composition: instance.compositionIndex, layer: instance.layerIndex)
-            let layer = composition.storage.compositions[reference.composition].layers[reference.layer]
-            // 规则缺省的LetterBox也优先于文件表；不能按规则是否显式写了scale来决定优先级。
-            let mode = layer.imageFillRule?.scaleMode ?? composition.storage.catalog.imageScaleMode(for: reference)
-            local = try ImagePlacement.replacement(replacement, source: source, mode: mode)
-            clip = FrameClip(size: source.logicalSize, matrix: matrix)
-            guard let mapping = scene.imageTimes.mappings[instance.id] else {
-                throw SceneValidator.invalid("missingPreparedImageTime")
-            }
-            sampleTime = try mapping.time(at: time.frame,
-                frameRate: composition.storage.compositions[composition.storage.rootIndex].frameRate)
-        } else {
-            local = try ImagePlacement.original(source)
-            clip = nil
-            sampleTime = contentTime
-        }
-        let pixelMatrix = try local.following(matrix)
-        guard try pixelMatrix.hasArea() else { return }
-        if replacement != nil, scene.optionalMediaFailures.failure(for: instance.id) != nil {
-            try await optionalImageFallback(for: instance, source: source, matrix: matrix, opacity: opacity)
-            return
-        }
-        if let video = input.video {
-            // 视频直接复用NV12材质；未实现的图片效果不能丢掉后伪称替换画面正确。
-            guard motionTile == nil, motionBlur == nil, bulge == nil, cornerPin == nil else {
-                throw PAGError.unsupportedFeature("externalVideoImageEffects")
-            }
-            guard let owner = scene.externalVideos else {
-                throw SceneValidator.invalid("missingExternalVideoOwner")
-            }
-            let frame: VideoFrameTransfer
-            do {
-                frame = try await owner.frame(for: video, at: sampleTime, isPlaying: isPlaying)
-            } catch let error as PAGError {
-                switch error {
-                case .mediaFailure(let reason) where reason == "externalVideoNotReady" ||
-                    reason == "externalVideoMissingFrame": break
-                case .mediaFailure, .unsupportedFeature, .sourceChanged, .ioFailure:
-                    scene.optionalMediaFailures.record(error, for: instance.id)
-                default: throw error
-                }
-                // 暂不可用或终态失败都不能闪回原图；终态错误留在场景诊断表中。
-                try await optionalImageFallback(for: instance, source: source, matrix: matrix, opacity: opacity)
-                return
-            }
-            try Task.checkCancellation()
-            if composition.edits.placeholders[instance.id] != nil {
-                scene.placeholderClock?.deactivate(instance.id)
-            }
-            let identity = frame.identity
-            if videos[identity] == nil {
-                try budget.reserve(stride: frame.byteCount + 256)
-                videos[identity] = frame
-            }
-            try append(.video(FrameVideo(layerID: instance.id, resourceID: identity,
-                pixelSize: input.size, matrix: pixelMatrix, opacity: opacity, clip: clip)))
-            return
-        }
-        let selected: PAGImage
-        if input.animation != nil {
-            guard let owner = scene.animatedImages else {
-                throw SceneValidator.invalid("missingAnimatedImageOwner")
-            }
-            do {
-                selected = try await owner.frame(for: input, at: sampleTime)
-            } catch let error as PAGError {
-                switch error {
-                case .mediaFailure, .unsupportedAnimatedImage:
-                    // 首帧载入成功不保证后续所有帧可解；坏替换帧只停掉对应实例。
-                    scene.optionalMediaFailures.record(error, for: instance.id)
-                    try await optionalImageFallback(for: instance, source: source, matrix: matrix, opacity: opacity)
-                    return
-                default: throw error
-                }
-            }
-            // 媒体owner暂停点后必须重新检查撤销，旧帧不得发布到新编辑版本。
-            try Task.checkCancellation()
-        } else { selected = input }
-        let identity = selected.storage.identity
-        // 替换素材的原始逻辑框裁剪属于效果输入；直采路径不能把它错误放在平铺结果之后。
-        guard motionTile == nil || clip == nil else {
-            throw PAGError.unsupportedFeature("motionTileReplacementClip")
-        }
-        guard bulge == nil || clip == nil else {
-            throw PAGError.unsupportedFeature("bulgeReplacementClip")
-        }
-        guard cornerPin == nil || clip == nil else {
-            throw PAGError.unsupportedFeature("cornerPinReplacementClip")
-        }
-        if motionBlur != nil {
-            // 当前直采融合只与未裁边、未缩放的完整逻辑图等价；替换输入需独立映射合同。
-            guard motionTile != nil, bulge == nil, cornerPin == nil, clip == nil,
-                  source.logicalSize == input.size, source.scaleFactor == 1,
-                  source.anchor.x == 0, source.anchor.y == 0 else {
-                throw PAGError.unsupportedFeature("motionBlurImagePlacement")
-            }
-        }
-        let tile = try motionTile.map { try FrameMotionTile($0, placement: local, pixelSize: input.size) }
-        let cornerFrame = try cornerPin.map { try FrameCornerPin($0, placement: local) }
-        let bulgeFrame = try bulge.map { try FrameBulge($0, placement: local,
-            pixelSize: input.size, cornerPin: cornerFrame) }
-        if images[identity] == nil {
-            try budget.reserve(stride: 256)
-            images[identity] = selected
-        }
-        try append(.image(FrameImage(layerID: instance.id, resourceID: identity, pixelSize: input.size,
-                                      matrix: pixelMatrix, clip: clip,
-                                      opacity: opacity, contentTime: sampleTime,
-                                      motionTile: tile, motionBlur: motionBlur,
-                                      bulge: bulgeFrame, cornerPin: cornerFrame)))
-    }
-
-    /// 已选择替换但没有有效帧时使用占位；无占位保持透明，不恢复原始图。
-    private mutating func optionalImageFallback(for instance: LayerInstance, source: SourceImage,
-                                                matrix: SceneAffine, opacity: Double) async throws {
-        if composition.edits.placeholders[instance.id] != nil {
-            try await placeholder(for: instance, source: source, matrix: matrix, opacity: opacity)
-        }
-    }
-
-    /// 可选替换素材尚无有效帧时画占位；占位按自身尺寸布局，不继承失败素材纹理尺寸。
-    private mutating func placeholder(for instance: LayerInstance, source: SourceImage,
-                                      matrix: SceneAffine, opacity: Double) async throws {
-        guard let input = composition.edits.placeholders[instance.id],
-              let clock = scene.placeholderClock else {
-            throw SceneValidator.invalid("missingPlaceholder")
-        }
-        let elapsed = clock.elapsed(for: instance.id, at: auxiliaryTime)
-        let selected: PAGImage
-        if input.animation != nil {
-            guard let owner = scene.animatedImages else {
-                throw SceneValidator.invalid("missingAnimatedImageOwner")
-            }
-            selected = try await owner.frame(for: input, at: elapsed)
-        } else { selected = input }
-        try Task.checkCancellation()
-        let reference = SourceLayerReference(composition: instance.compositionIndex, layer: instance.layerIndex)
-        let layer = composition.storage.compositions[reference.composition].layers[reference.layer]
-        let mode = layer.imageFillRule?.scaleMode ?? composition.storage.catalog.imageScaleMode(for: reference)
-        let placement = try ImagePlacement.replacement(input, source: source, mode: mode)
-        let pixelMatrix = try placement.following(matrix)
-        guard try pixelMatrix.hasArea() else { return }
-        let identity = selected.storage.identity
-        if images[identity] == nil {
-            try budget.reserve(stride: 256)
-            images[identity] = selected
-        }
-        try append(.image(FrameImage(layerID: instance.id, resourceID: identity,
-            pixelSize: input.size, matrix: pixelMatrix,
-            clip: FrameClip(size: source.logicalSize, matrix: matrix),
-            opacity: opacity, contentTime: elapsed)))
-        placeholderIDs.append(instance.id)
-    }
-
     /// 图像与预合成共用上游相邻内容帧矩阵；严格相等的滤镜在计划阶段直接跳过。
     private func sampleMotionBlur(layer: SourceLayer, instance: LayerInstance,
                                   contentFrame: Int64, current: SceneAffine) throws -> MotionBlurSampling? {
@@ -712,7 +531,7 @@ private struct FramePlanBuilder {
     }
 
     /// 单条命令也先计量；不能等数组增长完成后才发现预算不足。
-    private mutating func append(_ command: FrameCommand) throws {
+    mutating func append(_ command: FrameCommand) throws {
         try budget.reserve(stride: 512)
         switch command {
         case .solid, .image, .video, .shape, .text, .textBulge: primitiveCount += 1

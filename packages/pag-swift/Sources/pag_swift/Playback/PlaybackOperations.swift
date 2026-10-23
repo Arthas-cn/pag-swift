@@ -1,4 +1,5 @@
 import Foundation
+import QuartzCore
 
 /// 显示 owner 必须实现的实际提交边界；P4 没有返回虚假成功的生产默认实现。
 protocol PlaybackSubmitting: Sendable {
@@ -34,12 +35,19 @@ struct PlaybackFrameRequest: Sendable {
     let isPlaying: Bool
     /// 只累计实际播放的辅助时间，占位动图与跑马灯跨根循环共用此值。
     let auxiliaryTime: PAGTime
+    /// GIF/WebP 使用的独立累计播放时间；根循环、seek 和 rewind 不回拨。
+    let imageAnimationTime: PAGTime
+    /// 所属安装会话的诊断；内部受控提交测试可以不传。
+    let diagnostics: PlaybackDiagnosticSession?
+    /// 与系统 presentedTime 同原点的采样时刻，用于扣除首帧 CPU/GPU 等待。
+    let sampledHostTime: Double
 
     /// 传递一次显示请求及播放意图；测试默认暂停采样以保持确定性。
     init(scene: PreparedScene?, time: PAGTime, scaleMode: PAGScaleMode,
          token: PlaybackRequestToken, gate: PlaybackSubmissionGate,
          endsPlayback: Bool, isPlaying: Bool = false,
-         auxiliaryTime: PAGTime = .zero) {
+         auxiliaryTime: PAGTime = .zero, imageAnimationTime: PAGTime = .zero,
+         diagnostics: PlaybackDiagnosticSession? = nil) {
         self.scene = scene
         self.time = time
         self.scaleMode = scaleMode
@@ -48,6 +56,9 @@ struct PlaybackFrameRequest: Sendable {
         self.endsPlayback = endsPlayback
         self.isPlaying = isPlaying
         self.auxiliaryTime = auxiliaryTime
+        self.imageAnimationTime = imageAnimationTime
+        self.diagnostics = diagnostics
+        sampledHostTime = CACurrentMediaTime()
     }
 }
 

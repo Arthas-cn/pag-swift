@@ -10,6 +10,8 @@ struct ParsedFileCache {
     private var oldest: ParseKey?
     /// 当前条目的保守计费总和，不包含调用者单独持有的已淘汰文件。
     private(set) var byteCount = 0
+    /// 因容量回收产生的累计淘汰数，主动移除不计入。
+    private(set) var evictionCount = 0
 
     /// 当前留存条目数，供内部诊断和预算验证。
     var count: Int { entries.count }
@@ -27,7 +29,10 @@ struct ParsedFileCache {
         let charge = file.storage.estimatedBytes.addingReportingOverflow(128)
         guard !charge.overflow, charge.partialValue <= byteLimit else { return }
         let cost = charge.partialValue
-        while byteCount > byteLimit - cost, let key = oldest { remove(key) }
+        while byteCount > byteLimit - cost, let key = oldest {
+            remove(key)
+            evictionCount += 1
+        }
         entries[key] = ParsedCacheEntry(file: file, bytes: cost, previous: nil, next: newest)
         if let newest { entries[newest]?.previous = key }
         else { oldest = key }

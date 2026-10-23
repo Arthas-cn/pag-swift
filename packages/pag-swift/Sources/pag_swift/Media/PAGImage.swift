@@ -26,7 +26,7 @@ public struct PAGImage: Sendable {
 
     /// 已应用 EXIF 方向后的原始像素尺寸，不含图层或显示缩放。
     public var size: PAGSize { storage.size }
-    /// 动图有独立帧表但仍由PAG图层内容时间驱动，不启动第二个显示时钟。
+    /// 动图按独立累计播放进度选帧，只跟随 PAG 播放/暂停；复用同一显示刷新，不启动另一个 Timer。
     public var kind: PAGImageKind { video != nil ? .video : (animation == nil ? .still : .animated) }
     /// 静态素材为nil，动图为一轮总时长。
     public var duration: PAGTime? {

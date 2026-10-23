@@ -53,6 +53,7 @@ enum StableFileReader {
     /// beforeVerification 仅供内部确定性验证，在读取完毕、最终来源核对前执行。
     @concurrent static func read(from url: URL, limits: PAGLoadLimits,
                                  beforeVerification: (@Sendable () throws -> Void)? = nil) async throws -> LoadSnapshot {
+        let started = ContinuousClock.now
         try Task.checkCancellation()
         guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else {
             throw PAGError.unsupportedURL
@@ -94,7 +95,10 @@ enum StableFileReader {
         catch { throw PAGError.sourceChanged }
         guard finalCanonical == canonical, finalHandle == initialHandle, finalPath == initialHandle,
               data.count == initialHandle.byteCount else { throw PAGError.sourceChanged }
-        return try await LoadSnapshot.prepare(data: data, limits: limits)
+        let readSeconds = loadElapsed(since: started)
+        var snapshot = try await LoadSnapshot.prepare(data: data, limits: limits)
+        snapshot.readSeconds = readSeconds
+        return snapshot
     }
 
     /// 验证普通文件和声明长度，所有大块分配都发生在这些检查之后。

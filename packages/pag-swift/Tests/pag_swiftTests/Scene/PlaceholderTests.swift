@@ -48,7 +48,7 @@ struct PlaceholderTests {
         #expect(clock.elapsed(for: id, at: PAGTime(microseconds: 2_100_000)) == .zero)
     }
 
-    /// 视频首帧尚不可用时计划选择真实GIF占位，成功提交后跨seek按辅助时间推进。
+    /// 视频首帧尚不可用时选择真实 GIF 完整画布，实际呈现激活后跨 seek 按辅助时间推进。
     @Test func animatedPlaceholderUsesActiveTimeAfterPendingVideo() async throws {
         let file = try await ImageTimeFixtures.file(rule: nil, start: 0, duration: 30,
             offsets: [0], fileDuration: 30)
@@ -61,7 +61,7 @@ struct PlaceholderTests {
         let first = try await plan(scene, frame: 0, active: 1_000_000)
         let firstID = try #require(imageID(first))
         #expect(first.videos.isEmpty && first.placeholderIDs.count == 1)
-        #expect(first.images[firstID]?.storage.pixels.count == 512 * 512 * 4)
+        #expect(first.images[firstID]?.storage.pixels.count == Int(gif.size.width * gif.size.height) * 4)
         scene.placeholderClock?.activate(first.placeholderIDs, at: PAGTime(microseconds: 1_000_000))
         let later = try await plan(scene, frame: 5, active: 1_200_000)
         let laterID = try #require(imageID(later))

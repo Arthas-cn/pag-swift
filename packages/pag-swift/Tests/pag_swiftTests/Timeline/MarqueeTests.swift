@@ -70,6 +70,60 @@ struct MarqueeTests {
         #expect(textMatrices(rewound) == textMatrices(first))
     }
 
+    /// 单 tag 文字更新只重置该源槽，其它源槽的多个实例保留已累计的滚动时间。
+    @Test func changingOneTagPreservesOtherActivationTimes() async throws {
+        let file = try await EditableFixtures.file()
+        var composition = file.composition
+        let options = try PAGMarqueeOptions(speed: 50)
+        for tag in ["text:0", "text:1"] {
+            try await composition.apply(.text(String(repeating: "A", count: 50), layout: .marquee(options)), forTag: tag)
+        }
+        let original = try await PreparedScene.prepare(composition)
+        let originalClock = try #require(original.marqueeClock)
+        let firstIDs = try #require(composition.dynamicSlotRecords().first { $0.slot.tag == "text:0" })
+            .instances.map { composition.storage.instances[$0].id }
+        let secondRecord = try #require(composition.dynamicSlotRecords().first { $0.slot.tag == "text:1" })
+        let secondIndex = try #require(secondRecord.instances.first)
+        let secondID = composition.storage.instances[secondIndex].id
+        originalClock.activate(firstIDs + [secondID], at: PAGTime(microseconds: 100_000))
+        try await composition.apply(.text(String(repeating: "B", count: 50), layout: .marquee(options)), forTag: "text:1")
+        let edited = try await PreparedScene.prepare(composition, reusing: original)
+        let clock = try #require(edited.marqueeClock)
+        for id in firstIDs {
+            #expect(clock.elapsed(for: id, at: PAGTime(microseconds: 300_000)).microseconds == 200_000)
+        }
+        #expect(clock.elapsed(for: secondID, at: PAGTime(microseconds: 300_000)) == .zero)
+        #expect(originalClock.elapsed(for: secondID, at: PAGTime(microseconds: 300_000)).microseconds == 200_000)
+    }
+
+    /// 某实例在有效完成帧中缺席时冻结，重新出现接着累计，不把隐藏间隔算作滚动时间。
+    @Test func invisibleSlotFreezesIndependently() async throws {
+        let file = try await EditableFixtures.file()
+        let first = try EditableFixtures.layer(path: [21, 10], in: file.composition).id
+        let second = try EditableFixtures.layer(path: [23], in: file.composition).id
+        let clock = PresentationActivationClock()
+        clock.activate([first, second], at: PAGTime(microseconds: 100))
+        clock.activate([second], at: PAGTime(microseconds: 200))
+        #expect(clock.elapsed(for: first, at: PAGTime(microseconds: 900)).microseconds == 100)
+        #expect(clock.elapsed(for: second, at: PAGTime(microseconds: 900)).microseconds == 800)
+        clock.activate([first, second], at: PAGTime(microseconds: 900))
+        #expect(clock.elapsed(for: first, at: PAGTime(microseconds: 1000)).microseconds == 200)
+        #expect(clock.elapsed(for: second, at: PAGTime(microseconds: 1000)).microseconds == 900)
+    }
+
+    /// 新快照准备完但旧快照才首次激活时，未改变的槽仍能收到同一次有效起点。
+    @Test func retainedClockReceivesActivationDuringPreparation() async throws {
+        let file = try await EditableFixtures.file()
+        let id = try EditableFixtures.layer(path: [21, 10], in: file.composition).id
+        let original = PresentationActivationClock()
+        let copied = original.retaining([id])
+        original.activate([id], at: PAGTime(microseconds: 500))
+        #expect(copied.elapsed(for: id, at: PAGTime(microseconds: 700)).microseconds == 200)
+        copied.reset()
+        #expect(copied.elapsed(for: id, at: PAGTime(microseconds: 700)) == .zero)
+        #expect(original.elapsed(for: id, at: PAGTime(microseconds: 700)).microseconds == 200)
+    }
+
     /// 通过正式求值入口取文字矩阵与播放时钟，避免只测试纯数学函数。
     private func frame(_ scene: PreparedScene, playing: Bool, active: Int64) async throws -> PreparedFrame {
         try await FramePlanner.prepare(scene, at: .zero, targetSize: scene.composition.size,

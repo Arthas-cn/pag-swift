@@ -22,15 +22,19 @@ struct PreparedScene: Sendable {
     let bitmaps: BitmapFrameStore?
     /// 当前播放器的内嵌视频会话与有界输入缓存；其他播放器不可复用该可变owner。
     let videos: VideoFrameStore?
-    /// 编辑快照中的GIF/WebP按内容时间取帧，场景独占有界后台媒体owner。
+    /// 编辑快照中的 GIF/WebP 按独立累计进度取帧，场景独占有界后台媒体 owner。
     let animatedImages: AnimatedImageFrameStore?
+    /// 安装快照中允许使用的动图素材，播放采样复用此集合，不逐帧重建覆盖表。
+    let animatedMaterialIDs: Set<DocumentIdentity>
+    /// 动图素材的独立起点；只在场景安装前更新，之后随完整请求作为不可变值传送。
+    var imageAnimationTimeline: ImageAnimationTimeline
     /// 编辑快照中的MP4/MOV按图层内容时间取帧，场景独占系统视频会话。
     let externalVideos: (any ExternalVideoSampling)?
     /// 可选替换素材的实例级终态诊断；同一准备快照只记首次失败。
     let optionalMediaFailures: OptionalMediaFailures
     /// 只有占位实际出现时才建立的辅助时钟，普通素材无额外逐帧状态。
     let placeholderClock: PresentationActivationClock?
-    /// 只有滚动文字被有效提交后才建立起点；暂停与seek不改变累计播放时间。
+    /// 只有滚动文字实际有效呈现后才建立起点；暂停与 seek 不改变已累计的播放时间。
     let marqueeClock: PresentationActivationClock?
 
     /// 后台准备完整场景资源；同一源存储的旧结果可复用静态几何，媒体采样器可供确定性验证注入。
@@ -118,19 +122,25 @@ struct PreparedScene: Sendable {
         }
         let hasBitmaps = composition.storage.compositions.contains { $0.bitmap != nil }
         let hasVideos = composition.storage.compositions.contains { $0.video != nil }
-        let hasAnimatedImages = composition.edits.images.values.contains { $0.animation != nil } ||
-            composition.edits.placeholders.values.contains { $0.animation != nil }
+        let animatedMaterialIDs = Set((Array(composition.edits.images.values) + Array(composition.edits.placeholders.values))
+            .compactMap { $0.animation?.identity })
         let hasExternalVideos = composition.edits.images.values.contains { $0.video != nil }
-        let samePlaceholders = reusable?.composition.edits.placeholders.count == composition.edits.placeholders.count &&
-            composition.edits.placeholders.allSatisfy { entry in
-                guard let previous = reusable?.composition.edits.placeholders[entry.key] else { return false }
-                return previous.kind == entry.value.kind &&
-                    previous.storage.identity == entry.value.storage.identity
-            }
+        let retainedPlaceholders = Set(composition.edits.placeholders.compactMap { entry -> PAGLayerID? in
+            guard let old = reusable?.composition.edits.placeholders[entry.key],
+                  old.kind == entry.value.kind, old.storage.identity == entry.value.storage.identity else { return nil }
+            return entry.key
+        })
         let hasMarquee = !marqueeWidths.isEmpty
-        let sameMarquee = reusable?.composition.edits.textOverflows == composition.edits.textOverflows &&
-            reusable?.composition.edits.texts == composition.edits.texts
+        let retainedMarquees = Set(composition.storage.instances.compactMap { instance -> PAGLayerID? in
+            let reference = SourceLayerReference(composition: instance.compositionIndex, layer: instance.layerIndex)
+            guard marqueeWidths[reference] != nil, let old = reusable,
+                  let slot = composition.storage.catalog.slots[reference],
+                  old.composition.edits.textOverflows[slot] == composition.edits.textOverflows[slot],
+                  old.composition.edits.texts[slot] == composition.edits.texts[slot] else { return nil }
+            return instance.id
+        })
         let dynamicShapes = try reusable?.dynamicShapes ?? (dynamicTemplates.isEmpty ? nil : PreparedShapeStore(templates: dynamicTemplates))
+        let imageAnimationTimeline = try ImageAnimationTimeline(composition, reusing: reusable, budget: &budget)
         // 最后一次分析或同源复用收费后仍可能被撤销；完整场景只有在最终取消检查后才发布。
         try Task.checkCancellation()
         return PreparedScene(composition: composition, shapes: shapes, dynamicShapes: dynamicShapes,
@@ -139,14 +149,16 @@ struct PreparedScene: Sendable {
                              estimatedPictureAnalysisBytes: pictureCost,
                              bitmaps: hasBitmaps ? reusable?.bitmaps ?? BitmapFrameStore() : nil,
                              videos: hasVideos ? reusable?.videos ?? VideoFrameStore() : nil,
-                             animatedImages: hasAnimatedImages ?
+                             animatedImages: !animatedMaterialIDs.isEmpty ?
                                 reusable?.animatedImages ?? AnimatedImageFrameStore() : nil,
+                             animatedMaterialIDs: animatedMaterialIDs,
+                             imageAnimationTimeline: imageAnimationTimeline,
                              externalVideos: hasExternalVideos ?
                                 externalVideoSampler ?? reusable?.externalVideos ?? ExternalVideoFrameStore() : nil,
                              optionalMediaFailures: OptionalMediaFailures(),
                              placeholderClock: composition.edits.placeholders.isEmpty ? nil :
-                                (samePlaceholders ? reusable?.placeholderClock : nil) ?? PresentationActivationClock(),
+                                reusable?.placeholderClock?.retaining(retainedPlaceholders) ?? PresentationActivationClock(),
                              marqueeClock: hasMarquee ?
-                                (sameMarquee ? reusable?.marqueeClock : nil) ?? PresentationActivationClock() : nil)
+                                reusable?.marqueeClock?.retaining(retainedMarquees) ?? PresentationActivationClock() : nil)
     }
 }

@@ -1,8 +1,58 @@
 import Testing
 @testable import pag_swift
 
-/// 动态形状缓存的四条上限、逻辑字节、失败/取消与旧结果保活；不缓存整屏图像。
+/// 动态形状缓存的同源四帧、全局64条、逻辑字节与失败原子性；不缓存整屏图像。
 struct PreparedShapeStoreTests {
+    /// 真实慢素材含多个动态源层；重复同一根帧应复用全部形状对象，避免重新细分与上传。
+    @Test(arguments: ["list/14.pag", "list/17.pag"])
+    func repeatedRealFrameRetainsEveryShape(_ name: String) async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: name))
+        let scene = try await PreparedScene.prepare(file.composition)
+        let first = try await FramePlanner.prepare(scene, at: .zero,
+            targetSize: PAGSize(width: 500, height: 500), scale: 1, mode: .aspectFit)
+        let second = try await FramePlanner.prepare(scene, at: .zero,
+            targetSize: PAGSize(width: 500, height: 500), scale: 1, mode: .aspectFit)
+        #expect(Set(first.shapes.keys.filter { $0.sampleFrame != nil }.map(\.source)).count > 4)
+        #expect(Set(first.shapes.keys) == Set(second.shapes.keys))
+        for (key, geometry) in first.shapes { #expect(second.shapes[key] === geometry) }
+    }
+
+    /// 超过四个源层仍各自保留近期结果；一层进入第五帧只淘汰自己的最旧采样。
+    @Test func multipleSourcesKeepTheirOwnRecentSamples() async throws {
+        let references = (0..<12).map { SourceLayerReference(composition: 0, layer: $0) }
+        let elements = try ShapePathFixtures.elements(ShapePathFixtures.track())
+        let store = try PreparedShapeStore(templates: Dictionary(uniqueKeysWithValues: references.map { ($0, elements) }))
+        var initial: [PreparedShapeLayer] = []
+        for reference in references {
+            initial.append(try await store.sample(.init(source: reference, frame: 0), maximumPreparedBytes: 1_000_000))
+        }
+        for (reference, expected) in zip(references, initial) {
+            #expect(try await store.sample(.init(source: reference, frame: 0), maximumPreparedBytes: 1_000_000) === expected)
+        }
+        for frame: Int64 in 1...4 {
+            _ = try await store.sample(.init(source: references[0], frame: frame), maximumPreparedBytes: 1_000_000)
+        }
+        #expect(try await store.sample(.init(source: references[0], frame: 0), maximumPreparedBytes: 1_000_000) !== initial[0])
+        for (reference, expected) in zip(references.dropFirst(), initial.dropFirst()) {
+            #expect(try await store.sample(.init(source: reference, frame: 0), maximumPreparedBytes: 1_000_000) === expected)
+        }
+    }
+
+    /// 65个小源层受全局64条限制，仍按访问顺序淘汰；不能因总字节很小而无界持有。
+    @Test func globalEntryLimitStillEvictsLeastRecentSource() async throws {
+        let references = (0..<65).map { SourceLayerReference(composition: 0, layer: $0) }
+        let elements = try ShapePathFixtures.elements(ShapePathFixtures.track())
+        let store = try PreparedShapeStore(templates: Dictionary(uniqueKeysWithValues: references.map { ($0, elements) }))
+        var samples: [PreparedShapeLayer] = []
+        for reference in references {
+            samples.append(try await store.sample(.init(source: reference, frame: 0), maximumPreparedBytes: 1_000_000))
+        }
+        #expect(await store.retainedBytes == samples.dropFirst().reduce(0) { $0 + $1.estimatedBytes })
+        #expect(try await store.sample(.init(source: references[1], frame: 0), maximumPreparedBytes: 1_000_000) === samples[1])
+        #expect(try await store.sample(.init(source: references[0], frame: 0), maximumPreparedBytes: 1_000_000) !== samples[0])
+        #expect(await store.retainedBytes <= 64 * 1024 * 1024)
+    }
+
     /// 命中推进LRU，加入第五帧淘汰最旧帧；已经交给调用方的旧结果仍可用。
     @Test func boundedAccessOrderAndOldResources() async throws {
         let store = try makeStore()

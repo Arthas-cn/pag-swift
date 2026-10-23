@@ -28,6 +28,21 @@ public actor PAGLoader {
     private var flights: [UUID: LoadFlight] = [:]
     /// 只有当前允许加入的 flight 才出现在此表；旧任务不能覆盖新任务的键。
     private var joinable: [ParseKey: UUID] = [:]
+    /// 生命周期累计标量，当前占用由 statistics 即时组装。
+    private var counters = PAGCacheStatistics()
+    /// 只保留最后 128 次终止报告，避免大量资源浏览产生无界历史。
+    public private(set) var recentReports: [PAGLoadReport] = []
+
+    /// 返回不可变计数与容量快照；不会暴露或改变缓存中的文档。
+    public var statistics: PAGCacheStatistics {
+        var value = counters
+        value.evictions = cache.evictionCount
+        value.cachedFiles = cache.count
+        value.cachedBytes = cache.byteCount
+        value.byteLimit = cache.byteLimit
+        value.inFlightParses = flights.count
+        return value
+    }
 
     /// 创建独立服务；缓存预算可为零，负数抛 invalidArgument。
     public init(limits: PAGLoadLimits = .standard, cacheByteLimit: Int = 67_108_864) throws {
@@ -52,16 +67,27 @@ public actor PAGLoader {
 
     /// 完整读取本地 PAG 并验证场景，不要求扩展名；取消抛 CancellationError。
     public func load(from url: URL, policy: PAGLoadPolicy = .useCache) async throws -> PAGFile {
-        try await load(source: .file(url), policy: policy)
+        try await load(source: .file(url), policy: policy).file
     }
 
     /// 读取内存 PAG；只有完整摘要和解码约束相同才共享，失败不留下成功缓存。
     public func load(data: Data, policy: PAGLoadPolicy = .useCache) async throws -> PAGFile {
+        try await load(source: .data(data), policy: policy).file
+    }
+
+    /// 稳定读取本地文件并返回本次阶段报告；错误仍抛出且写入 recentReports。
+    public func loadWithReport(from url: URL, policy: PAGLoadPolicy = .useCache) async throws -> PAGLoadResult {
+        try await load(source: .file(url), policy: policy)
+    }
+
+    /// 完整验证内存数据并返回本次阶段报告；没有文件读取阶段。
+    public func loadWithReport(data: Data, policy: PAGLoadPolicy = .useCache) async throws -> PAGLoadResult {
         try await load(source: .data(data), policy: policy)
     }
 
     /// 清除留存并撤销当前请求/flight 的缓存资格；旧等待者及已返回文件保持有效。
     public func removeCachedFiles() {
+        counters.invalidations += 1
         generation = UUID()
         cache.removeAll()
         joinable.removeAll()
@@ -75,10 +101,11 @@ public actor PAGLoader {
     }
 
     /// 统一两个 public 入口；请求从准备前登记，保证清理能撤销迟到的准备结果。
-    private func load(source: LoadSource, policy: PAGLoadPolicy) async throws -> PAGFile {
+    private func load(source: LoadSource, policy: PAGLoadPolicy) async throws -> PAGLoadResult {
         let requestID = UUID()
         let waiter = LoadWaiter()
         let sourceURL = source.requestURL
+        if policy == .reload { counters.invalidations += 1 }
         if policy == .reload, let sourceURL { invalidate(sourceURL: sourceURL, key: nil, excluding: nil) }
         requests[requestID] = LoadRequest(sourceURL: sourceURL, waiter: waiter, canCache: policy != .uncached)
         defer {
@@ -86,55 +113,87 @@ public actor PAGLoader {
             cancelRequest(requestID)
             requests.removeValue(forKey: requestID)
         }
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            let snapshot: LoadSnapshot
-            switch source {
-            case .file(let url): snapshot = try await operations.read(url, limits)
-            case .data(let data): snapshot = try await operations.prepare(data, limits)
-            }
-            try Task.checkCancellation()
-            guard !waiter.isCancelled else { throw CancellationError() }
-            let key = ParseKey(snapshot: snapshot, limits: limits)
-            requests[requestID]?.key = key
-            if policy == .reload, requests[requestID]?.canCache == true {
-                invalidate(sourceURL: sourceURL, key: key, excluding: requestID)
-            }
-            guard requests[requestID]?.canCache == true else {
-                // uncached 或准备期间被清理的请求只完成自身，不创建可写回的新代 flight。
-                let file = try await operations.decode(snapshot, limits)
+        do {
+            let file = try await withTaskCancellationHandler { () async throws -> PAGFile in
+                try Task.checkCancellation()
+                let snapshot: LoadSnapshot
+                switch source {
+                case .file(let url): snapshot = try await operations.read(url, limits)
+                case .data(let data): snapshot = try await operations.prepare(data, limits)
+                }
+                try Task.checkCancellation()
+                guard !waiter.isCancelled else { throw CancellationError() }
+                let key = ParseKey(snapshot: snapshot, limits: limits)
+                requests[requestID]?.key = key
+                requests[requestID]?.readSeconds = snapshot.readSeconds
+                requests[requestID]?.digestSeconds = snapshot.digestSeconds
+                if policy == .reload, requests[requestID]?.canCache == true {
+                    invalidate(sourceURL: sourceURL, key: key, excluding: requestID)
+                }
+                guard requests[requestID]?.canCache == true else {
+                    // uncached 或准备期间被清理的请求只完成自身，不创建可写回的新代 flight。
+                    requests[requestID]?.disposition = .bypassed
+                    counters.parses += 1
+                    let started = ContinuousClock.now
+                    defer { requests[requestID]?.parseSeconds = loadElapsed(since: started) }
+                    let file = try await operations.decode(snapshot, limits)
+                    try Task.checkCancellation()
+                    return file
+                }
+                if let file = cache.value(for: key) {
+                    counters.hits += 1
+                    requests[requestID]?.disposition = .hit
+                    return file
+                }
+                counters.misses += 1
+                joinOrStart(key: key, snapshot: snapshot, requestID: requestID, waiter: waiter)
+                let waitStarted = ContinuousClock.now
+                defer {
+                    if requests[requestID]?.disposition == .shared {
+                        requests[requestID]?.sharedWaitSeconds = loadElapsed(since: waitStarted)
+                    }
+                }
+                let file = try await waiter.value()
                 try Task.checkCancellation()
                 return file
+            } onCancel: {
+                // 同步恢复本调用者，不等待共享解码或 actor 排队；随后移除共享任务中的登记。
+                waiter.cancel()
+                Task { await self.cancelRequest(requestID) }
             }
-            if let file = cache.value(for: key) { return file }
-            joinOrStart(key: key, snapshot: snapshot, requestID: requestID, waiter: waiter)
-            let file = try await waiter.value()
-            try Task.checkCancellation()
-            return file
-        } onCancel: {
-            // 同步恢复本调用者，不等待共享解码或 actor 排队；随后移除共享任务中的登记。
-            waiter.cancel()
-            Task { await self.cancelRequest(requestID) }
+            let report = finishReport(requestID, policy: policy, status: .succeeded, error: nil)
+            return PAGLoadResult(file: file, report: report)
+        } catch {
+            let cancelled = error is CancellationError || Task.isCancelled || waiter.isCancelled
+            if cancelled { counters.cancellations += 1 }
+            else { counters.failures += 1 }
+            _ = finishReport(requestID, policy: policy, status: cancelled ? .cancelled : .failed, error: error)
+            throw error
         }
     }
 
     /// 加入当前 flight，或创建由 loader 显式持有和收尾的新任务。
     private func joinOrStart(key: ParseKey, snapshot: LoadSnapshot, requestID: UUID, waiter: LoadWaiter) {
         if let id = joinable[key], flights[id] != nil {
+            counters.sharedRequests += 1
+            requests[requestID]?.disposition = .shared
             flights[id]?.waiters[requestID] = waiter
             requests[requestID]?.flightID = id
             operations.observe(.joined(flights[id]?.waiters.count ?? 0))
             return
         }
         let flightID = UUID()
+        counters.parses += 1
+        requests[requestID]?.disposition = .miss
         let task = Task { [operations, limits] in
+            let started = ContinuousClock.now
             let result: Result<PAGFile, any Error>
             do {
                 let file = try await operations.decode(snapshot, limits)
                 try Task.checkCancellation()
                 result = .success(file)
             } catch { result = .failure(error) }
-            self.finish(flightID, result: result)
+            self.finish(flightID, result: result, parseSeconds: loadElapsed(since: started))
         }
         flights[flightID] = LoadFlight(key: key, generation: generation, task: task, waiters: [requestID: waiter])
         joinable[key] = flightID
@@ -143,16 +202,18 @@ public actor PAGLoader {
     }
 
     /// 处理一个 flight 的唯一完成，旧 ID 或已无等待者的迟到回调直接丢弃。
-    private func finish(_ id: UUID, result: Result<PAGFile, any Error>) {
+    private func finish(_ id: UUID, result: Result<PAGFile, any Error>, parseSeconds: Double) {
         guard let flight = flights.removeValue(forKey: id) else {
             // 最后等待者取消后，忽略取消的底层操作仍可能完成；不能重新创建缓存资格。
             operations.observe(.discarded)
+            counters.discardedResults += 1
             return
         }
         let isCurrent = joinable[flight.key] == id
         if isCurrent { joinable.removeValue(forKey: flight.key) }
         var receivers = 0
-        for waiter in flight.waiters.values {
+        for (requestID, waiter) in flight.waiters {
+            requests[requestID]?.parseSeconds = parseSeconds
             if waiter.resolve(result) { receivers += 1 }
         }
         // 取消可以在 actor 消息之前同步赢得门闩；没有接收者的结果不得回填缓存。
@@ -161,6 +222,23 @@ public actor PAGLoader {
             cache.insert(file, for: flight.key)
         }
         operations.observe(.retired)
+    }
+
+    /// 在请求仍登记时固化报告；报告不保存原始输入、文件或可变解析任务。
+    private func finishReport(_ id: UUID, policy: PAGLoadPolicy, status: PAGLoadStatus,
+                              error: (any Error)?) -> PAGLoadReport {
+        // 请求由本函数所在的 load defer 统一移除，因此整个完成路径必须仍能找到它。
+        let request = requests[id]!
+        let identity = request.key?.identity.digest.map { String(format: "%02x", $0) }.joined()
+        let report = PAGLoadReport(id: id, startedAt: request.startedAt, sourcePath: request.sourceURL?.path,
+            documentIdentity: identity, policy: String(describing: policy), status: status,
+            cache: request.disposition, readSeconds: request.readSeconds, digestSeconds: request.digestSeconds,
+            parseSeconds: request.parseSeconds, sharedWaitSeconds: request.sharedWaitSeconds,
+            totalSeconds: loadElapsed(since: request.started), error: error.map { String(describing: $0) },
+            statistics: statistics)
+        recentReports.append(report)
+        if recentReports.count > 128 { recentReports.removeFirst(recentReports.count - 128) }
+        return report
     }
 
     /// 摘掉一个等待者；最后等待者离开才取消共享任务，并立即释放可加入索引。
@@ -208,6 +286,10 @@ private enum LoadSource: Sendable {
 
 /// 一个调用者的暂存状态，生命周期严格从 load 进入到退出。
 private struct LoadRequest {
+    /// 此次调用登记时间，供人类日志关联。
+    let startedAt = Date()
+    /// 此次调用单调起点，用于总耗时。
+    let started = ContinuousClock.now
     /// 标准化请求 URL；内存请求为 nil。
     let sourceURL: URL?
     /// 独立取消/完成门闩，跨线程状态由自身 Mutex 保护。
@@ -218,6 +300,16 @@ private struct LoadRequest {
     var key: ParseKey?
     /// 已登记的共享解析 ID；独立或准备中的请求为 nil。
     var flightID: UUID?
+    /// 摘要完成后才可确定缓存路径。
+    var disposition: PAGCacheDisposition = .unavailable
+    /// 稳定读取耗时；内存输入或准备失败时为 nil。
+    var readSeconds: Double?
+    /// 完整摘要耗时；尚未完成时为 nil。
+    var digestSeconds: Double?
+    /// 实际解析耗时；命中或取消时解析尚未返回则为 nil。
+    var parseSeconds: Double?
+    /// 加入共享解析的等待耗时；其它路径为 nil。
+    var sharedWaitSeconds: Double?
 }
 
 /// Loader 拥有的共享任务，状态仅在 loader actor 内修改。

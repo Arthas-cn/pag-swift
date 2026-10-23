@@ -229,7 +229,7 @@ struct FrameImage: Sendable {
     let clip: FrameClip?
     /// 此图层自身不透明度，所属组透明度保持在 beginGroup 中。
     let opacity: Double
-    /// 原图按图层局部时间，替换按根实例ImageFillRule映射；可含缓动越界值，静图不依赖此采样时间。
+    /// 动图按独立累计进度；视频按根实例 ImageFillRule 映射，静图不依赖此采样时间。
     let contentTime: PAGTime
     /// tag56效果的输入归一化中心与逐帧参数；nil走普通图片采样。
     let motionTile: FrameMotionTile?
@@ -239,13 +239,15 @@ struct FrameImage: Sendable {
     let bulge: FrameBulge?
     /// tag58四角逆投影；nil表示没有图像透视输出。
     let cornerPin: FrameCornerPin?
+    /// 替换槽的额外 alpha 纹理与独立布局，和文件原有遮罩共同生效。
+    let slotMask: FrameImageMask?
 
     /// 保留图像输入身份与可选效果，默认调用仍不改变普通图片语义。
     init(layerID: PAGLayerID?, resourceID: DocumentIdentity, pixelSize: PAGSize,
          matrix: SceneAffine, clip: FrameClip?, opacity: Double, contentTime: PAGTime,
          motionTile: FrameMotionTile? = nil, motionBlur: MotionBlurSampling? = nil,
          bulge: FrameBulge? = nil,
-         cornerPin: FrameCornerPin? = nil) {
+         cornerPin: FrameCornerPin? = nil, slotMask: FrameImageMask? = nil) {
         self.layerID = layerID
         self.resourceID = resourceID
         self.pixelSize = pixelSize
@@ -257,6 +259,7 @@ struct FrameImage: Sendable {
         self.motionBlur = motionBlur
         self.bulge = bulge
         self.cornerPin = cornerPin
+        self.slotMask = slotMask
     }
 }
 

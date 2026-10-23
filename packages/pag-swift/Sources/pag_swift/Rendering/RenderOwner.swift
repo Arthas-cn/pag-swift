@@ -73,6 +73,7 @@ actor RenderOwner: PlaybackSubmitting {
         let placeholderIDs: [PAGLayerID]
         let marqueeIDs: [PAGLayerID]
         if let scene = request.scene {
+            let preparationStarted = ContinuousClock.now
             guard request.token.documentID == scene.composition.storage.identity else {
                 throw PAGError.renderingFailure("metalRequestDocument")
             }
@@ -80,7 +81,10 @@ actor RenderOwner: PlaybackSubmitting {
             let frame = try await FramePlanner.prepare(scene, at: request.time, targetSize: geometry.size,
                                                        scale: geometry.scale, mode: request.scaleMode,
                                                        isPlaying: request.isPlaying,
-                                                       auxiliaryTime: request.auxiliaryTime)
+                                                       auxiliaryTime: request.auxiliaryTime,
+                                                       imageAnimationTime: request.imageAnimationTime,
+                                                       waitsForAnimatedImages: false)
+            let animationDiagnostics = await scene.animatedImages?.diagnostics
             try validate(request, target: target)
             let resources: MetalResources
             if let existing = self.resources { resources = existing }
@@ -104,6 +108,11 @@ actor RenderOwner: PlaybackSubmitting {
             representedTime = frame.plan.time.representedTime
             placeholderIDs = frame.placeholderIDs
             marqueeIDs = frame.marqueeIDs
+            request.diagnostics?.preparedFrame(frame, seconds: loadElapsed(since: preparationStarted),
+                retainedInputs: resources.byteCount,
+                groupTextures: resources.groups.activeBytes + resources.groups.freeBytes,
+                pictureTextures: resources.pictures.activeBytes + resources.pictures.retainedBytes,
+                inputLimit: resources.byteLimit, animation: animationDiagnostics)
         } else {
             // 清屏不借用假场景，也不为零绘制编译管线或分配输入buffer。
             guard request.token.documentID == nil, request.time == .zero, !request.endsPlayback else {
@@ -141,11 +150,20 @@ actor RenderOwner: PlaybackSubmitting {
                     observe?(.encoded(request.token.requestID, drawCount: batch?.drawCount ?? 0))
                     let mailbox = target.mailbox
                     let observe = self.observe
+                    let receipt = FramePresentationReceipt(request: request, mailbox: mailbox,
+                        placeholderIDs: placeholderIDs, marqueeIDs: marqueeIDs)
+                    drawable.addPresentedHandler { displayed in
+                        // 系统回调只读取呈现标量，不能把 drawable 传到控制或 UI actor。
+                        receipt.presented(at: displayed.presentedTime)
+                    }
                     buffer.addCompletedHandler { completed in
                         // 系统回调只转换状态并归还值租约，不读取actor字段或跨域传回裸buffer。
                         let outcome: Result<Bool, any Error>
                         if completed.status == .completed {
                             outcome = .success(true)
+                            let gpuSeconds = completed.gpuEndTime - completed.gpuStartTime
+                            request.diagnostics?.record(.gpuCompleted, token: request.token,
+                                time: request.time, seconds: gpuSeconds > 0 ? gpuSeconds : nil)
                             // 时间戳只在真实完成回调内读取；诊断不影响提交成功或迟到丢弃的规则。
                             if let observe {
                                 observe(.gpuCompleted(request.token.requestID,
@@ -164,13 +182,17 @@ actor RenderOwner: PlaybackSubmitting {
                         mailbox.withDrawingPermission(for: lease) {
                             buffer.present(drawable)
                             buffer.commit()
+                            request.diagnostics?.record(.submitted, token: request.token, time: request.time)
                             return true
                         } == true
                     } == true
                     guard committed else { throw CancellationError() }
                 }
                 if obtained { completion.didCommit() }
-                else { completion.abandon(.success(false)) }
+                else {
+                    request.diagnostics?.record(.drawableUnavailable, token: request.token, time: request.time)
+                    completion.abandon(.success(false))
+                }
             } catch {
                 // 尚未commit即可放弃租约；丢弃buffer也可能带来系统回调，两条路径必须竞争同一出口。
                 completion.abandon(.failure(error))
@@ -178,14 +200,12 @@ actor RenderOwner: PlaybackSubmitting {
         }
         try validate(request, target: target)
         guard try result.get() else { return .targetUnavailable }
-        if let batch, !batch.pictureWorks.isEmpty || !placeholderIDs.isEmpty || !marqueeIDs.isEmpty {
-            if !batch.pictureWorks.isEmpty { observe?(.pictureReadyToPublish(request.token.requestID)) }
-            // 锁序与commit一致：播放gate→显示信箱。撤销前不发布旧纹理，也不提前启动占位时钟。
+        if let batch, !batch.pictureWorks.isEmpty {
+            observe?(.pictureReadyToPublish(request.token.requestID))
+            // GPU 完成允许发布局部纹理；附加动画起点必须等待实际呈现回调。
             let published = request.gate.withCompletionPermission(for: request.token) {
                 target.mailbox.withCompletedEpochPermission(for: request.token.targetEpoch) {
-                    if !batch.pictureWorks.isEmpty { batch.publishPictures() }
-                    request.scene?.placeholderClock?.activate(placeholderIDs, at: request.auxiliaryTime)
-                    request.scene?.marqueeClock?.activate(marqueeIDs, at: request.auxiliaryTime)
+                    batch.publishPictures()
                     return true
                 } == true
             } == true

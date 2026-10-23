@@ -18,10 +18,12 @@ final class AnimatedImageStorage: Sendable {
     let playCount: Int?
     /// 全画布正尺寸；解码帧尺寸改变时拒绝发布。
     let size: PAGSize
+    /// 宿主可选逐帧源；存在时 data 为空，帧合成由宿主 decoder 保证。
+    let externalSource: (any PAGAnimatedImageSource)?
 
     /// 只接收已完整核对的时间表和编码快照。
     init(identity: DocumentIdentity, data: Data, sourceType: String, ends: [Int64],
-         playCount: Int?, size: PAGSize) throws {
+         playCount: Int?, size: PAGSize, externalSource: (any PAGAnimatedImageSource)? = nil) throws {
         guard let duration = ends.last, duration > 0 else {
             throw PAGError.unsupportedAnimatedImage(sourceType)
         }
@@ -32,9 +34,10 @@ final class AnimatedImageStorage: Sendable {
         durationMicroseconds = duration
         self.playCount = playCount
         self.size = size
+        self.externalSource = externalSource
     }
 
-    /// 用所属图层内容时间二分选帧；有限循环结束后保持最后一帧。
+    /// 用调用方提供的独立素材进度二分选帧；有限循环结束后保持最后一帧。
     func frameIndex(at time: PAGTime) -> Int {
         let value = max(0, time.microseconds)
         if let playCount, value / durationMicroseconds >= playCount { return ends.count - 1 }

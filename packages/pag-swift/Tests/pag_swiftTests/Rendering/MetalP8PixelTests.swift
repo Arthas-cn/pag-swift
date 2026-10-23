@@ -39,7 +39,7 @@ struct MetalP8PixelTests {
             let gifScene = try await PreparedScene.prepare(animated)
             let mediaPoints = [SIMD2(90, 320), SIMD2(270, 320)]
             let gifStart = try await owner.pixels(frame(gifScene, at: .zero), target: target, at: mediaPoints)
-            let gifEnd = try await owner.pixels(frame(gifScene, at: PAGTime(microseconds: 300_000)),
+            let gifEnd = try await owner.pixels(frame(gifScene, at: .zero, imageTime: 300_000),
                 target: target, at: mediaPoints)
             #expect(gifStart != gifEnd, "局部帧和恢复背景处置必须改变真实drawable")
 
@@ -80,12 +80,13 @@ struct MetalP8PixelTests {
         window.close()
     }
 
-    /// 以正式场景规划进入单一显示目标；播放时才给滚动文字提供活跃辅助时间。
+    /// 根位置、跑马灯激活时间与 GIF 独立进度分别传入正式规划，不能用根 seek 代替动图推进。
     private func frame(_ scene: PreparedScene, at time: PAGTime,
-                       active: Int64 = 0, playing: Bool = false) async throws -> PreparedFrame {
+                       active: Int64 = 0, imageTime: Int64 = 0, playing: Bool = false) async throws -> PreparedFrame {
         try await FramePlanner.prepare(scene, at: time,
             targetSize: try PAGSize(width: 360, height: 640), scale: 1, mode: .aspectFit,
-            isPlaying: playing, auxiliaryTime: PAGTime(microseconds: active))
+            isPlaying: playing, auxiliaryTime: PAGTime(microseconds: active),
+            imageAnimationTime: PAGTime(microseconds: imageTime))
     }
 }
 #endif

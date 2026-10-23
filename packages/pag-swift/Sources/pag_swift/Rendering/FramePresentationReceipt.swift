@@ -1,0 +1,66 @@
+import Foundation
+
+/// 系统呈现回调所需的小值及同步时钟；不持有播放器、PreparedScene 或 GPU 批次。
+struct FramePresentationReceipt: Sendable {
+    /// 完整控制代数，用于拒绝 seek/暂停/换内容后的迟到呈现。
+    let token: PlaybackRequestToken
+    /// 与播放器控制共用的短锁许可。
+    let gate: PlaybackSubmissionGate
+    /// 实际显示目标的当前代数和可见性。
+    let mailbox: DisplayTargetMailbox
+    /// 当前占位素材实例的同步时钟；没有占位为 nil。
+    let placeholderClock: PresentationActivationClock?
+    /// 当前滚动文字实例的同步时钟；没有跑马灯为 nil。
+    let marqueeClock: PresentationActivationClock?
+    /// 本帧实际显示的占位实例，空集合也必须冻结旧实例。
+    let placeholderIDs: [PAGLayerID]
+    /// 本帧实际显示的滚动实例，空集合也必须冻结旧实例。
+    let marqueeIDs: [PAGLayerID]
+    /// 会话诊断记录，不反向持有控制器。
+    let diagnostics: PlaybackDiagnosticSession?
+    /// 本帧根时间，用于报告复现参数。
+    let time: PAGTime
+    /// 采样时播放器累计活动时间，暂停内容不继续增加。
+    let auxiliaryTime: PAGTime
+    /// 是否应将采样到实际呈现的间隔计入活动时间。
+    let isPlaying: Bool
+    /// 系统 host time 的请求采样点，与 presentedTime 同原点。
+    let sampledHostTime: Double
+
+    /// 只复制回调需要的身份和独立同步状态，避免 drawable 持有整个场景图。
+    init(request: PlaybackFrameRequest, mailbox: DisplayTargetMailbox,
+         placeholderIDs: [PAGLayerID], marqueeIDs: [PAGLayerID]) {
+        token = request.token
+        gate = request.gate
+        self.mailbox = mailbox
+        placeholderClock = request.scene?.placeholderClock
+        marqueeClock = request.scene?.marqueeClock
+        self.placeholderIDs = placeholderIDs
+        self.marqueeIDs = marqueeIDs
+        diagnostics = request.diagnostics
+        time = request.time
+        auxiliaryTime = request.auxiliaryTime
+        isPlaying = request.isPlaying
+        sampledHostTime = request.sampledHostTime
+    }
+
+    /// 正呈现时间才可启动时钟；零值明确表示系统跳过，不能以 GPU 完成代替。
+    func presented(at hostTime: Double) {
+        guard hostTime.isFinite, hostTime > 0 else {
+            diagnostics?.record(.presentationSkipped, token: token, time: time)
+            return
+        }
+        let delay = isPlaying ? max(0, hostTime - sampledHostTime) : 0
+        let micros = Double(auxiliaryTime.microseconds) + delay * 1_000_000
+        let activeTime = PAGTime(microseconds: Int64(min(micros, Double(Int64.max - 2048))))
+        // 与提交一致的锁序：播放许可 → 显示代数 → 单实例时钟，不能反向进入 player actor。
+        let accepted = gate.withPresentationPermission(for: token) {
+            mailbox.withCompletedEpochPermission(for: token.targetEpoch) {
+                placeholderClock?.activate(placeholderIDs, at: activeTime)
+                marqueeClock?.activate(marqueeIDs, at: activeTime)
+                return true
+            } == true
+        } == true
+        diagnostics?.record(.presented, token: token, time: time, seconds: hostTime, accepted: accepted)
+    }
+}

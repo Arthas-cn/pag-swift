@@ -330,6 +330,10 @@ struct MetalFrameBatch {
             encoder.setFragmentBuffer(draw.mesh.nodes, offset: 0, index: 3)
             encoder.setFragmentBuffer(draw.mesh.triangles, offset: 0, index: 4)
             encoder.setFragmentBuffer(draw.mesh.buffer, offset: 0, index: 5)
+            var slotMask = draw.slotMask?.uniforms ?? MetalSlotMaskUniforms()
+            encoder.setFragmentBytes(&slotMask, length: MemoryLayout<MetalSlotMaskUniforms>.stride, index: 17)
+            // 未启用时绑定现有图像以满足共同管线资源布局，片元不会读取此替代纹理。
+            encoder.setFragmentTexture(draw.slotMask?.texture ?? draw.texture, index: 2)
             if let mode = draw.trackMatteMode {
                 var rawMode = UInt32(mode.rawValue)
                 encoder.setFragmentBytes(&rawMode, length: MemoryLayout<UInt32>.stride, index: 11)
@@ -406,6 +410,8 @@ struct MetalDraw {
     let mask: MetalMaskInput?
     /// 图片、局部组或渐变小LUT输入；与gradient同在只允许纹理渐变分支。
     let texture: (any MTLTexture)?
+    /// 仅业务替换图像携带；局部组输出已包含此 alpha，不在组结果重复应用。
+    let slotMask: MetalSlotMaskInput?
     /// 羽化alpha或轨道源的同尺寸局部图；只有已组合的内容图可以携带它。
     let featherMaskTexture: (any MTLTexture)?
     /// 视频的完整双平面输入及CV包装；nil表示不是视频，与texture互斥。

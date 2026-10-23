@@ -1,7 +1,7 @@
 /// 随库编译的MSL源码，首次GPU使用才在后台编译；不在播放循环中创建library。
 enum MetalShaderSource {
     /// 数学内核与计算验证共用，显示入口只负责目标映射、资源绑定与颜色采样。
-    static let source = "#include <metal_stdlib>\nusing namespace metal;\n" + MetalCoverageMath.source + MetalVideoMath.source + MetalGradientMath.source + """
+    static let source = "#include <metal_stdlib>\nusing namespace metal;\n" + MetalCoverageMath.source + MetalVideoMath.source + MetalGradientMath.source + MetalSlotMaskShader.source + """
     /// 共享常量布局必须和Swift端的112字节结构一致。
     struct PAGUniforms {
         /// 网格局部到最终显示像素x的行向量。
@@ -52,13 +52,15 @@ enum MetalShaderSource {
     fragment float4 pagImage(PAGRaster in [[stage_in]], constant PAGUniforms &uniforms [[buffer(1)]],
                              const device float4 *clips [[buffer(2)]], const device PAGCoverageNode *nodes [[buffer(3)]],
                              const device uint *triangles [[buffer(4)]], const device PAGCoverageVertex *vertices [[buffer(5)]],
-                             texture2d<float> image [[texture(0)]]) {
+                             texture2d<float> image [[texture(0)]],
+                                   constant PAGSlotMaskUniforms &slotMask [[buffer(17)]],
+                                   texture2d<float> slotAlpha [[texture(2)]]) {
         float2 pixel = in.position.xy + uniforms.targetOffset.xy;
         float area = pagCoverage(pixel, uniforms, clips, nodes, triangles, vertices);
         float2 relative = pixel - float2(uniforms.horizontalPixels.z, uniforms.verticalPixels.z);
         float2 uv = float2(dot(uniforms.inverse.xy, relative), dot(uniforms.inverse.zw, relative));
         constexpr sampler inputSampler(coord::normalized, address::clamp_to_edge, filter::linear);
-        return image.sample(inputSampler, uv) * uniforms.color * area;
+        return image.sample(inputSampler, uv) * uniforms.color * area * pagSlotMaskAlpha(pixel, slotMask, slotAlpha);
     }
     /// MotionTileFilter的Float比例与GLSL floor型mod；先钳边，再镜像，最后只对正phase交错位移。
     struct PAGMotionTileUniforms { float4 centerAndTile; float4 outputAndPhase; float4 mirror; };
@@ -431,14 +433,16 @@ enum MetalShaderSource {
                                    const device uint *triangles [[buffer(4)]], const device PAGCoverageVertex *vertices [[buffer(5)]],
                                    constant PAGMaskUniforms &mask [[buffer(7)]], const device PAGCoverageNode *maskNodes [[buffer(8)]],
                                    const device uint *maskTriangles [[buffer(9)]], const device PAGCoverageVertex *maskVertices [[buffer(10)]],
-                                   texture2d<float> image [[texture(0)]]) {
+                                   texture2d<float> image [[texture(0)]],
+                                   constant PAGSlotMaskUniforms &slotMask [[buffer(17)]],
+                                   texture2d<float> slotAlpha [[texture(2)]]) {
         float2 pixel = in.position.xy + uniforms.targetOffset.xy;
         float area = pagMaskedCoverage(pixel, uniforms, clips, nodes, triangles, vertices,
                                        mask, maskNodes, maskTriangles, maskVertices);
         float2 relative = pixel - float2(uniforms.horizontalPixels.z, uniforms.verticalPixels.z);
         float2 uv = float2(dot(uniforms.inverse.xy, relative), dot(uniforms.inverse.zw, relative));
         constexpr sampler inputSampler(coord::normalized, address::clamp_to_edge, filter::linear);
-        return image.sample(inputSampler, uv) * uniforms.color * area;
+        return image.sample(inputSampler, uv) * uniforms.color * area * pagSlotMaskAlpha(pixel, slotMask, slotAlpha);
     }
     /// 内层普通路径和外层普通路径各求一次非零覆盖，只对同一图像实际draw相乘。
     fragment float4 pagDoubleMaskedImage(PAGRaster in [[stage_in]], constant PAGUniforms &uniforms [[buffer(1)]],
@@ -448,7 +452,9 @@ enum MetalShaderSource {
                                           const device uint *innerTriangles [[buffer(9)]], const device PAGCoverageVertex *innerVertices [[buffer(10)]],
                                           constant PAGMaskUniforms &outer [[buffer(12)]], const device PAGCoverageNode *outerNodes [[buffer(13)]],
                                           const device uint *outerTriangles [[buffer(14)]], const device PAGCoverageVertex *outerVertices [[buffer(15)]],
-                                          texture2d<float> image [[texture(0)]]) {
+                                          texture2d<float> image [[texture(0)]],
+                                   constant PAGSlotMaskUniforms &slotMask [[buffer(17)]],
+                                   texture2d<float> slotAlpha [[texture(2)]]) {
         float2 pixel = in.position.xy + uniforms.targetOffset.xy;
         float area = pagMaskedCoverage(pixel, uniforms, clips, nodes, triangles, vertices,
                                        inner, innerNodes, innerTriangles, innerVertices);
@@ -459,7 +465,7 @@ enum MetalShaderSource {
         float2 relative = pixel - float2(uniforms.horizontalPixels.z, uniforms.verticalPixels.z);
         float2 uv = float2(dot(uniforms.inverse.xy, relative), dot(uniforms.inverse.zw, relative));
         constexpr sampler inputSampler(coord::normalized, address::clamp_to_edge, filter::linear);
-        return image.sample(inputSampler, uv) * uniforms.color * area;
+        return image.sample(inputSampler, uv) * uniforms.color * area * pagSlotMaskAlpha(pixel, slotMask, slotAlpha);
     }
     /// 预合成祖先普通蒙版在平铺完成的最终片元相乘，不改变Image层无自身mask的输入合同。
     fragment float4 pagMaskedMotionTileImage(PAGRaster in [[stage_in]], constant PAGUniforms &uniforms [[buffer(1)]],
