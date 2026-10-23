@@ -71,8 +71,10 @@ struct PreparedScene: Sendable {
                     let slot = composition.storage.catalog.slots[reference]
                     let style = slot.flatMap { composition.edits.texts[$0] } ?? text.style
                     let overflow = slot.flatMap { composition.edits.textOverflows[$0] }
-                    // 同文档不代表同文字；完整样式匹配后才能复用，隐藏也不能跳过未支持文本语义。
-                    if overflow != .truncate, let old = reusable?.texts[reference], old.style == style,
+                    // 截断产物的 style.text 已是可见前缀；复用必须比较旧快照的完整输入，
+                    // 不能用产物代替输入身份，也不应因无关编辑反复执行截断测宽和字形准备。
+                    let previousStyle = slot.flatMap { reusable?.composition.edits.texts[$0] } ?? text.style
+                    if let old = reusable?.texts[reference], previousStyle == style,
                        slot.flatMap({ reusable?.composition.edits.textOverflows[$0] }) == overflow {
                         try budget.reserve(stride: old.estimatedBytes)
                         texts[reference] = old

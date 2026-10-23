@@ -1,7 +1,7 @@
 import Foundation
 import pag_swift
 
-/// 独立宿主逻辑验收：真实目录扫描、损坏候选保留、可见预览名额和取消释放，不启动 Demo。
+/// 独立宿主逻辑验收：真实目录扫描、损坏候选保留、全部可见行预览和取消释放，不启动 Demo。
 @main struct DemoCatalogProbe {
     /// 运行失败输出错误并返回非零，成功保存可复现 JSON。
     static func main() async {
@@ -12,7 +12,7 @@ import pag_swift
         }
     }
 
-    /// 用真实 PAG 副本和明确无效候选验证目录与生命周期，再扫描仓库原资源。
+    /// 用真实 PAG 副本和无效候选验证目录；超过三行均应持有预览，离屏、搜索和退出后仍须释放。
     @MainActor private static func run() async throws {
         let root = URL(filePath: CommandLine.arguments[1], directoryHint: .isDirectory)
         let output = URL(filePath: CommandLine.arguments[2])
@@ -30,11 +30,14 @@ import pag_swift
         await catalog.refresh(root: temporary)
         try expect(catalog.error == nil && catalog.resources.count == 5, "目录模型扫描失败")
         for resource in candidates.prefix(4) { catalog.setVisible(resource.id, true) }
-        try await wait { catalog.previews.count == 3 }
+        try await wait { Set(catalog.previews.keys) == Set(candidates.prefix(4).map(\.id)) }
+        // 第五行随后进入可见区域也应立即获得会话，不能依赖前面的行先退出。
+        catalog.setVisible("opaque", true)
+        try await wait { Set(catalog.previews.keys) == Set(candidates.map(\.id)) }
         weak let previous = catalog.previews["1"]
         catalog.setVisible("1", false)
-        try await wait { catalog.previews["nested/b.pag"] != nil && previous == nil }
-        try expect(catalog.peakPreviewCount == 3, "预览超过三份或旧行未释放")
+        try await wait { catalog.previews.count == 4 && catalog.previews["1"] == nil && previous == nil }
+        try expect(catalog.peakPreviewCount == 5, "未为全部五个可见行创建预览")
         catalog.filter("nested")
         try await wait { catalog.previews.count == 1 }
         try expect(catalog.filtered.map(\.id) == ["nested/b.pag"], "搜索错误")
@@ -49,7 +52,7 @@ import pag_swift
         let summary = CatalogProbeReport(candidateCount: actual.count, extensionless: actual.filter { $0.url.pathExtension.isEmpty }.map(\.id),
             peakPreviews: catalog.peakPreviewCount,
             checks: ["recursive scan", "damaged candidates retained", "replacement media excluded", "stable order",
-                     "search", "three preview limit", "offscreen release", "row replacement", "leave and return"])
+                     "search", "all visible previews", "offscreen release", "visible growth", "leave and return"])
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let encoded = try encoder.encode(summary)

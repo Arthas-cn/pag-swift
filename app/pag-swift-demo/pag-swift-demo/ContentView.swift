@@ -3,7 +3,7 @@ import pag_swift
 
 /// 资源浏览入口，只组织导航和可见行，实际预览使用库的 PAGView。
 struct ContentView: View {
-    /// 单窗口目录与有限预览拥有者。
+    /// 单窗口目录与可见行预览拥有者。
     @State private var catalog = DemoCatalogModel()
     /// 搜索草稿，变化时由模型生成稳定过滤结果。
     @State private var query = ""
@@ -22,7 +22,7 @@ struct ContentView: View {
                     HStack {
                         Text("\(catalog.filtered.count) / \(catalog.resources.count) 个 PAG 候选")
                         Spacer()
-                        Text("预览 \(catalog.previews.count)/3").monospacedDigit()
+                        Text("预览 \(catalog.previews.count)").monospacedDigit()
                     }
                     .font(.caption).foregroundStyle(.secondary)
                     if let error = catalog.error {
@@ -90,11 +90,11 @@ enum DemoRoute: Hashable {
     case hosts(DemoResource)
 }
 
-/// 单行只有一个顶层卡片；播放器由三名额协调器提供，行本身不创建媒体工作。
+/// 单行只有一个顶层卡片；播放器由目录模型按可见性提供，行本身不创建媒体工作。
 private struct DemoResourceRow: View {
     /// 当前资源候选，身份和路径始终稳定。
     let resource: DemoResource
-    /// 只有获得预览名额才非 nil，离屏立即卸载 PAGView。
+    /// 当前可见行的预览会话；尚未创建或已离屏释放时为 nil。
     let session: DemoSession?
     /// 之前一次预览留下的有限文本摘要。
     let previous: String?
@@ -113,7 +113,7 @@ private struct DemoResourceRow: View {
                 Text(resource.id).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 Text(session.map { $0.metadata.isEmpty ? resource.sizeLabel : $0.metadata } ?? resource.sizeLabel)
                     .font(.caption).monospacedDigit()
-                Text(session?.errorMessage ?? session?.status ?? previous ?? "等待可见预览名额")
+                Text(session?.errorMessage ?? session?.status ?? previous ?? "等待预览")
                     .font(.caption).foregroundStyle(session?.errorMessage == nil ? Color.secondary : Color.red).lineLimit(2)
             }
             Spacer(minLength: 0)

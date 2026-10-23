@@ -6,7 +6,7 @@ import subprocess
 root = Path(__file__).resolve().parents[1]
 products = Path('/private/tmp/pag-swift-macos-derived/Build/Products/Debug')
 source = root / 'app/pag-swift-demo/pag-swift-demo'
-# 这些文件只组织宿主生命周期；探针直接调用它们，避免复制另一份目录或名额逻辑。
+# 这些文件只组织宿主生命周期；探针直接调用它们，避免复制另一份目录或可见性调度逻辑。
 files = ['DemoResourceCatalog.swift', 'DemoCatalogModel.swift', 'DemoSession.swift', 'DemoReport.swift']
 command = ['xcrun', 'swiftc', '-parse-as-library', '-swift-version', '6',
            '-enable-upcoming-feature', 'ApproachableConcurrency', '-target', 'arm64-apple-macos26.0',

@@ -80,9 +80,9 @@ public protocol PAGAnimatedImageSource: Sendable {
 extension PAGImage {
     /// 后台建立宿主完整静帧的内容身份，不接管其下载或格式解码。
     @concurrent public static func make(from frame: PAGImageFrame) async throws -> PAGImage {
-        var bytes = Data("pag.hostFrame.\(frame.width)x\(frame.height)".utf8)
-        bytes.append(frame.pixels)
-        let identity = try DocumentIdentity(data: bytes)
+        // 摘要保留尺寸前缀和像素顺序，但不为最多 64 MiB 的输入再复制整张画布。
+        let prefix = Data("pag.hostFrame.\(frame.width)x\(frame.height)".utf8)
+        let identity = try DocumentIdentity(data: frame.pixels, prefix: prefix)
         return try PAGImage(storage: frame.storage(identity: identity))
     }
 

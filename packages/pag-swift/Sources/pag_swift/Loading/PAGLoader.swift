@@ -107,7 +107,7 @@ public actor PAGLoader {
         let sourceURL = source.requestURL
         if policy == .reload { counters.invalidations += 1 }
         if policy == .reload, let sourceURL { invalidate(sourceURL: sourceURL, key: nil, excluding: nil) }
-        requests[requestID] = LoadRequest(sourceURL: sourceURL, waiter: waiter, canCache: policy != .uncached)
+        requests[requestID] = LoadRequest(sourceURL: sourceURL, canCache: policy != .uncached)
         defer {
             // 取消回调的 actor 消息可能还没到；这里同样负责摘除，且操作可重复。
             cancelRequest(requestID)
@@ -292,8 +292,6 @@ private struct LoadRequest {
     let started = ContinuousClock.now
     /// 标准化请求 URL；内存请求为 nil。
     let sourceURL: URL?
-    /// 独立取消/完成门闩，跨线程状态由自身 Mutex 保护。
-    let waiter: LoadWaiter
     /// 清理/reload 可撤销的缓存参与资格。
     var canCache: Bool
     /// 摘要准备完成后才设置的解析键。

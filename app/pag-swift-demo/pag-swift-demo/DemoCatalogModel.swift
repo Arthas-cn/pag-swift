@@ -1,13 +1,13 @@
 import Foundation
 import Observation
 
-/// 首页目录和三份可见预览的拥有者；停止旧预览后才释放名额给下一行。
+/// Demo 首页目录和所有可见行预览的拥有者；离屏或离开列表时停止并释放对应会话。
 @MainActor @Observable final class DemoCatalogModel {
     /// 递归扫描的全部候选，包含当前无法解析的文件。
     private(set) var resources: [DemoResource] = []
     /// 搜索后的稳定顺序，过滤只影响列表，不改变播放全部的集合。
     private(set) var filtered: [DemoResource] = []
-    /// 列表直接观察每个活动会话，最多三个。
+    /// 按资源身份持有可见行的活动会话，不设固定数量上限。
     private(set) var previews: [String: DemoSession] = [:]
     /// 离屏后仍保留一行最终摘要，不保留其播放器或纹理。
     private(set) var summaries: [String: String] = [:]
@@ -65,7 +65,7 @@ import Observation
         schedule()
     }
 
-    /// 进入详情/批播或后台即关闭首页预览；返回后按仍可见的行重新申请名额。
+    /// 进入详情/批播或后台即关闭首页预览；返回后为仍可见的行重新创建会话。
     func setEnabled(_ value: Bool) {
         isEnabled = value
         schedule()
@@ -77,8 +77,8 @@ import Observation
         await reconciliation?.value
     }
 
-    /// 稳定选择最多三行；其余可见行明确显示等待名额。
-    private var desired: Set<String> { isEnabled ? Set(visible.sorted().prefix(3)) : [] }
+    /// 列表启用时所有可见行都应持有预览；禁用时清空目标以触发释放。
+    private var desired: Set<String> { isEnabled ? visible : [] }
 
     /// 至多存在一个协调任务；其 await 期间可见集合改变后，下一轮读取最新目标。
     private func schedule() {
