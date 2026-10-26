@@ -2,6 +2,9 @@
 
 import PackageDescription
 
+// 本地开发与 swift test 使用本目录。远程 SPM 使用仓库根 Package.swift；
+// 改 platforms、product 或 swiftSettings 时两处一起改。
+
 let package = Package(
     name: "pag-swift",
     platforms: [.iOS(.v26), .macOS(.v26)],
