@@ -13,6 +13,23 @@ public struct PAGFile: Sendable {
     public var editableTextIndices: [Int] { storage.catalog.allowedTexts }
     /// 升序且无重复的允许图片索引，可能是原始槽位的子集。
     public var editableImageIndices: [Int] { storage.catalog.allowedImages }
+
+    /// 原始静态图片与实际采样 bitmap 序列的像素尺寸，用于宿主组合自身图片预算。
+    /// 静态图按文件资源表计量；bitmap 按内容身份去重，不随预合成实例重复计数。
+    /// 不包含宿主替换图、文字纹理、视频缓冲或 GPU 分配，也不解码额外帧。
+    public var embeddedImagePixelSizes: [(width: Int, height: Int)] {
+        var sizes = storage.resources.images.values.map {
+            (width: Int($0.image.size.width), height: Int($0.image.size.height))
+        }
+        var seen = Set<DocumentIdentity>()
+        for composition in storage.compositions {
+            // 播放器只采样最后一条 bitmap 序列；同内容的多个合成共享帧存储。
+            if let sequence = composition.bitmap?.sequences.last, seen.insert(sequence.identity).inserted {
+                sizes.append((width: sequence.width, height: sequence.height))
+            }
+        }
+        return sizes
+    }
 }
 
 /// 共享完整基础场景的合成快照；不提供任意空合成构造器。

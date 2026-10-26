@@ -4,6 +4,16 @@ import Testing
 
 /// 真实 bitmap 文件的字节证据、完整载入和安全失败，不生成合法 PAG 字节。
 struct PAGBitmapTests {
+    /// 根 bitmap 的预算只包含实际源画布，不展开 240 帧，也不按图层实例重复累计。
+    @Test func exposesSingleBitmapCanvasForHostBudget() async throws {
+        let file = try await PAGLoader().load(data: PAGFixtures.data(named: "RootLayerBitmap.pag"))
+        let sizes = file.embeddedImagePixelSizes
+        #expect(sizes.count == 1)
+        let size = try #require(sizes.first)
+        #expect(size.width == 720)
+        #expect(size.height == 1080)
+    }
+
     /// 四个真实根/预合成 bitmap 文件应完整载入；选择最后一条分辨率，关键帧数量匹配独立探查。
     @Test(arguments: ["RootLayerBitmap.pag", "RootLayerBitmapFreeze.pag", "RootLayerBitmapOffset.pag", "small.pag"])
     func loadsRealBitmapFiles(_ name: String) async throws {
