@@ -10,6 +10,8 @@ final class MetalResources {
     let byteLimit: Int
     /// 已上传的不可变资源，双向链用值键避免引用环。
     private var entries: [MetalResourceKey: MetalCacheEntry] = [:]
+    /// 输入LRU内的视频帧键；仅扫描视频项回收历史帧，不遍历或改变图片与几何的缓存策略。
+    private var videoInputs: Set<MetalResourceKey> = []
     /// 最近使用的资源，nil表示空缓存。
     private var newest: MetalResourceKey?
     /// 最久未使用的资源，nil表示空缓存。
@@ -252,9 +254,18 @@ final class MetalResources {
         return result
     }
 
+    /// 完整根帧准备成功后仅留存实际使用的视频输入；相同PTS的下一次绘制仍可复用两平面映射。
+    func retainCurrentVideoInputs(in budget: MetalFrameBudget) {
+        // 视频的完整PTS键会不断增加，通用LRU的64MiB历史对顺序播放没有复用价值。
+        // 当前批次和在途GPU仍各自持有MetalVideoInput，移除缓存引用不会提前释放其系统缓冲。
+        let unused = videoInputs.filter { budget.retained(for: $0) == nil }
+        for key in unused { remove(key) }
+    }
+
     /// 清掉可重建输入；command buffer和当前编码帧仍保活自己的引用，不会产生悬空指针。
     func removeAll() {
         entries.removeAll()
+        videoInputs.removeAll()
         newest = nil
         oldest = nil
         byteCount = 0
@@ -282,6 +293,8 @@ final class MetalResources {
         guard bytes <= byteLimit else { return }
         while byteCount > byteLimit - bytes, let oldest { remove(oldest) }
         entries[key] = MetalCacheEntry(resource: resource, bytes: bytes, previous: nil, next: newest)
+        // 只有实际进入LRU的帧才登记；超预算的单帧输入仍只由本帧预算和批次保活。
+        if case .video = key { videoInputs.insert(key) }
         if let newest { entries[newest]?.previous = key }
         else { oldest = key }
         newest = key
@@ -291,6 +304,7 @@ final class MetalResources {
     /// 淘汰一个节点并修复双向链，只释放缓存所有权。
     private func remove(_ key: MetalResourceKey) {
         guard let entry = entries.removeValue(forKey: key) else { return }
+        videoInputs.remove(key)
         if let previous = entry.previous { entries[previous]?.next = entry.next }
         else { newest = entry.next }
         if let next = entry.next { entries[next]?.previous = entry.previous }

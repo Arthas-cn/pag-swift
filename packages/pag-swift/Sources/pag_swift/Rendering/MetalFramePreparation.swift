@@ -8,8 +8,11 @@ enum MetalFramePreparation {
                         revision: UInt64 = 0, disablePictureCache: Bool = false,
                         pictures: MetalPictureStore? = nil) throws -> MetalFrameBatch {
         var budget = try MetalFrameBudget(maximumBytes: maximumBytes)
-        return try prepare(frame, width: width, height: height, resources: resources, budget: &budget,
-                           revision: revision, disablePictureCache: disablePictureCache, pictures: pictures)
+        let batch = try prepare(frame, width: width, height: height, resources: resources, budget: &budget,
+                                revision: revision, disablePictureCache: disablePictureCache, pictures: pictures)
+        // 递归效果子批次共用budget，只有完整根帧结束后才知道全部实际输入；不能逐子批次淘汰兄弟输入。
+        resources.retainCurrentVideoInputs(in: budget)
+        return batch
     }
 
     /// 与父帧共用单帧预算准备内容局部pass；失败时调用方丢弃复制的预算即可回退。
