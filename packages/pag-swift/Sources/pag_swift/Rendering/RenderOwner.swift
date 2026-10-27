@@ -155,7 +155,7 @@ actor RenderOwner: PlaybackSubmitting {
                     let receipt = FramePresentationReceipt(request: request, mailbox: mailbox,
                         placeholderIDs: placeholderIDs, marqueeIDs: marqueeIDs)
                     drawable.addPresentedHandler { displayed in
-                        // 系统回调只读取呈现标量，不能把 drawable 传到控制或 UI actor。
+                        // Core Animation 可能仍持有 drawable 内部锁；只读标量并异步交付，不能同步取播放门。
                         receipt.presented(at: displayed.presentedTime)
                     }
                     buffer.addCompletedHandler { completed in

@@ -70,15 +70,18 @@ struct PlaybackDiagnosticsTests {
         diagnostics.record(.gpuCompleted, token: token, seconds: 0.001)
         #expect(clock.elapsed(for: layer.id, at: PAGTime(microseconds: 2_000_000)) == .zero)
         receipt.presented(at: 0)
+        try await waitForPresentationUpdate { diagnostics.snapshot.skippedPresentations == 1 }
         #expect(diagnostics.snapshot.presentedFrames == nil)
         #expect(diagnostics.snapshot.skippedPresentations == 1)
         #expect(gate.claimCompletion(token))
         receipt.presented(at: request.sampledHostTime + 0.2)
+        try await waitForPresentationUpdate { diagnostics.snapshot.firstPresentationSeconds != nil }
         let elapsed = clock.elapsed(for: layer.id, at: PAGTime(microseconds: 2_000_000)).microseconds
         #expect(abs(elapsed - 800_000) <= 1)
         #expect(diagnostics.snapshot.firstPresentationSeconds != nil)
         _ = mailbox.beginMutation()
         receipt.presented(at: request.sampledHostTime + 0.4)
+        try await waitForPresentationUpdate { diagnostics.snapshot.stalePresentedFrames == 1 }
         #expect(diagnostics.snapshot.stalePresentedFrames == 1)
         #expect(clock.elapsed(for: layer.id, at: PAGTime(microseconds: 2_000_000)).microseconds == elapsed)
     }

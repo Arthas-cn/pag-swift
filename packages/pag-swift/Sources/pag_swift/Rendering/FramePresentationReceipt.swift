@@ -2,6 +2,8 @@ import Foundation
 
 /// 系统呈现回调所需的小值及同步时钟；不持有播放器、PreparedScene 或 GPU 批次。
 struct FramePresentationReceipt: Sendable {
+    /// 先离开 Core Animation 的内部锁，再按顺序核验播放许可；队列中只保留小值，不保留 drawable。
+    private static let callbacks = DispatchQueue(label: "pag.presentation", qos: .userInteractive)
     /// 完整控制代数，用于拒绝 seek/暂停/换内容后的迟到呈现。
     let token: PlaybackRequestToken
     /// 与播放器控制共用的短锁许可。
@@ -44,8 +46,13 @@ struct FramePresentationReceipt: Sendable {
         sampledHostTime = request.sampledHostTime
     }
 
-    /// 正呈现时间才可启动时钟；零值明确表示系统跳过，不能以 GPU 完成代替。
+    /// 系统回调只异步交付标量，不能同步取提交门；Metal Capture 的 present 可能正在等待该回调退出。
     func presented(at hostTime: Double) {
+        Self.callbacks.async { applyPresentation(at: hostTime) }
+    }
+
+    /// 离开系统回调后核验当前代数；正呈现时间才可启动时钟，零值不能以 GPU 完成代替。
+    private func applyPresentation(at hostTime: Double) {
         guard hostTime.isFinite, hostTime > 0 else {
             diagnostics?.record(.presentationSkipped, token: token, time: time)
             return
