@@ -85,6 +85,8 @@ actor RenderOwner: PlaybackSubmitting {
                                                        imageAnimationTime: request.imageAnimationTime,
                                                        waitsForAnimatedImages: false)
             let animationDiagnostics = await scene.animatedImages?.diagnostics
+            // 复用已有帧诊断，只取 owner 当前最多四个会话的标量；不增加计时器或保活系统对象。
+            let videoDiagnostics = await scene.videos?.decoderDiagnostics()
             try validate(request, target: target)
             let resources: MetalResources
             if let existing = self.resources { resources = existing }
@@ -112,7 +114,7 @@ actor RenderOwner: PlaybackSubmitting {
                 retainedInputs: resources.byteCount,
                 groupTextures: resources.groups.activeBytes + resources.groups.freeBytes,
                 pictureTextures: resources.pictures.activeBytes + resources.pictures.retainedBytes,
-                inputLimit: resources.byteLimit, animation: animationDiagnostics)
+                inputLimit: resources.byteLimit, animation: animationDiagnostics, video: videoDiagnostics)
         } else {
             // 清屏不借用假场景，也不为零绘制编译管线或分配输入buffer。
             guard request.token.documentID == nil, request.time == .zero, !request.endsPlayback else {

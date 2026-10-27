@@ -71,8 +71,8 @@ struct PlaybackOperations: Sendable {
     /// 可选内部诊断观察，不构成公开逐帧事件 API。
     var observe: @Sendable (PlaybackEvent) -> Void
 
-    /// 建立独立单调原点与真实准备器；不创建计时循环或显示提交器。
-    init() {
+    /// 建立独立单调原点与持有固定视频策略的准备器；不创建计时循环或显示提交器。
+    init(videoDecodingPolicy: PAGVideoDecodingPolicy = .hardwareRequired) {
         let origin = ContinuousClock.now
         now = {
             let duration = origin.duration(to: .now).components
@@ -80,7 +80,7 @@ struct PlaybackOperations: Sendable {
             let micros = UInt128(duration.seconds) * 1_000_000 + UInt128(max(duration.attoseconds, 0)) / 1_000_000_000_000
             return UInt64(min(micros, UInt128(UInt64.max)))
         }
-        prepare = { try await PreparedScene.prepare($0, reusing: $1) }
+        prepare = { try await PreparedScene.prepare($0, reusing: $1, videoDecodingPolicy: videoDecodingPolicy) }
         observe = { _ in }
     }
 }

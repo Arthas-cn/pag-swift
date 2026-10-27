@@ -4,35 +4,25 @@ import Dispatch
 import Foundation
 import VideoToolbox
 
-/// 媒体owner域内的H.264输入；物理设备要求硬解，模拟器使用系统可用解码器，不生成RGBA或显示附件。
+/// 媒体 owner 域内的 H.264 输入；按实例策略选择系统解码器，不生成 RGBA 或显示附件。
 final class H264Session {
     /// 系统压缩格式留在当前同步owner域内。
     private let format: H264Format
     /// 唯一允许取消回调访问的有锁会话桥，不暴露VT对象。
     let lifetime: VideoSessionLifetime
-    /// 系统报告是否实际硬解；查询失败为nil，仅模拟器允许false/nil，不作为物理设备性能证据。
+    /// 系统报告是否实际硬解；查询失败为 nil，automatic 允许 false/nil 但不能将其报告为硬解。
     let usesHardwareDecoder: Bool?
 
-    /// 生产平台强制硬解；开发模拟器没有同等硬件会话能力，只验证共同媒体/显示通路。
-    private static var requiresHardware: Bool {
-        #if targetEnvironment(simulator)
-        false
-        #else
-        true
-        #endif
-    }
-
-    /// 创建明确601的420v会话；仅模拟器允许系统软件解码，其他平台硬解不可用则失败。
+    /// 创建明确 601 的 420v 会话；默认保持真实设备硬解要求，automatic 只放开系统选路而不吞错误。
     init(sequence: SourceVideoSequence, cleanup: DispatchQueue,
+         decodingPolicy: PAGVideoDecodingPolicy = .hardwareRequired,
          willWaitForDecode: (@Sendable () -> Void)? = nil, willInvalidate: (@Sendable () -> Void)? = nil) throws {
         let format = try H264Format(sps: sequence.sps, pps: sequence.pps,
                                     width: sequence.videoWidth, height: sequence.videoHeight)
         let attributes: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey: true, kCVPixelBufferIOSurfacePropertiesKey: [:]]
-        // 模拟器实测RequireHardware报-12906；编译期例外不能降低真机和macOS的硬解要求。
-        let key = Self.requiresHardware ? kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder
-            : kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder
-        let specification: [CFString: Any] = [key: true]
+        // 策略在会话创建前固定；automatic 允许系统回退，但会话失败仍保留真实 OSStatus。
+        let specification: [CFString: Any] = [decodingPolicy.specificationKey: true]
         var raw: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(allocator: nil, formatDescription: format.description,
             decoderSpecification: specification as CFDictionary, imageBufferAttributes: attributes as CFDictionary,
@@ -49,7 +39,8 @@ final class H264Session {
         // SDK的void*输出拥有一次retain；必须显式接管，不能通过AnyObject?隐式桥接。
         let hardware = value?.takeRetainedValue()
         let usesHardware = queried == noErr ? (hardware as? NSNumber)?.boolValue : nil
-        guard !Self.requiresHardware || usesHardware == true else {
+        // required 必须得到系统的肯定答复；automatic 保留真实查询值但不拒绝软件或未知路径。
+        guard !decodingPolicy.requiresHardware || usesHardware == true else {
             lifetime.closeAndDrain()
             throw PAGError.mediaFailure("h264HardwareDecoderRequired")
         }

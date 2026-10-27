@@ -103,6 +103,14 @@ public struct PAGPlaybackDiagnostics: Sendable, Codable {
     public internal(set) var hostFrameFailures: Int?
     /// 最近宿主帧错误；没有动图或尚无错误为 nil。
     public internal(set) var lastHostFrameFailure: String?
+    /// 最近已准备帧所属内嵌视频 owner 的策略；没有内嵌视频为 nil。
+    public internal(set) var videoDecodingPolicy: PAGVideoDecodingPolicy?
+    /// 最近帧观察到系统明确使用硬解的当前会话数；尚未测量或没有内嵌视频为 nil。
+    public internal(set) var hardwareVideoDecoderSessions: Int?
+    /// 最近帧观察到系统明确未使用硬解的当前会话数；不是按 automatic 配置推测。
+    public internal(set) var softwareVideoDecoderSessions: Int?
+    /// 最近帧观察到系统查询无结果的当前会话数；未知不能计入硬解或软件解码。
+    public internal(set) var unknownVideoDecoderSessions: Int?
     /// 最近 128 条阶段事件，完整计数不因事件淘汰清零。
     public internal(set) var events: [PAGPlaybackDiagnosticEvent] = []
 }
@@ -156,7 +164,7 @@ final class PlaybackDiagnosticSession: Sendable {
     /// 帧计划完成后记录输入集合与成本；只保存摘要，不保活任何像素。
     func preparedFrame(_ frame: PreparedFrame, seconds: Double, retainedInputs: Int,
                        groupTextures: Int, pictureTextures: Int, inputLimit: Int,
-                       animation: AnimatedFrameDiagnostics?) {
+                       animation: AnimatedFrameDiagnostics?, video: VideoDecoderDiagnostics? = nil) {
         let frames = Set(frame.images.filter { $0.value.storage.sourceType == "pag.hostFrame" }.keys)
         let imageBytes = frame.images.values.reduce(0) { $0 + $1.storage.pixels.count }
         state.withLock { state in
@@ -177,6 +185,10 @@ final class PlaybackDiagnosticSession: Sendable {
             state.value.animatedDecodingFrames = animation?.decodingFrames
             state.value.hostFrameFailures = animation?.hostFailures
             state.value.lastHostFrameFailure = animation?.lastHostFailure
+            state.value.videoDecodingPolicy = video?.policy
+            state.value.hardwareVideoDecoderSessions = video?.hardwareSessions
+            state.value.softwareVideoDecoderSessions = video?.softwareSessions
+            state.value.unknownVideoDecoderSessions = video?.unknownSessions
         }
     }
 }
