@@ -41,6 +41,7 @@ struct PreparedScene: Sendable {
     /// 取消不发布部分结果，生产调用不注入时建立每场景独占的视频owner。
     @concurrent static func prepare(_ composition: PAGComposition, reusing previous: PreparedScene? = nil,
                                      maximumBytes: Int = 64 * 1024 * 1024,
+                                     videoDecodingPolicy: PAGVideoDecodingPolicy = .hardwareRequired,
                                      externalVideoSampler: (any ExternalVideoSampling)? = nil) async throws -> PreparedScene {
         try Task.checkCancellation()
         guard maximumBytes > 0 else { throw PAGError.invalidArgument("maximumPreparedSceneBytes") }
@@ -124,6 +125,20 @@ struct PreparedScene: Sendable {
         }
         let hasBitmaps = composition.storage.compositions.contains { $0.bitmap != nil }
         let hasVideos = composition.storage.compositions.contains { $0.video != nil }
+        // 静态几何可以复用，视频会话策略不同则必须建立新的媒体 owner，不能沿用旧硬约束。
+        let videos: VideoFrameStore?
+        if hasVideos {
+            if let previousVideos = reusable?.videos, previousVideos.decodingPolicy == videoDecodingPolicy {
+                // 同策略、同源编辑保留已有会话和帧缓存，避免无谓重建系统解码器。
+                videos = previousVideos
+            } else {
+                // 首次安装或策略不同必须使用新的实例独占 owner。
+                videos = VideoFrameStore(decodingPolicy: videoDecodingPolicy)
+            }
+        } else {
+            // 纯矢量/位图内容不创建任何内嵌视频解码 owner。
+            videos = nil
+        }
         let animatedMaterialIDs = Set((Array(composition.edits.images.values) + Array(composition.edits.placeholders.values))
             .compactMap { $0.animation?.identity })
         let hasExternalVideos = composition.edits.images.values.contains { $0.video != nil }
@@ -150,7 +165,7 @@ struct PreparedScene: Sendable {
                              imageTimes: imageTimes, pictureCandidates: pictureCandidates,
                              estimatedPictureAnalysisBytes: pictureCost,
                              bitmaps: hasBitmaps ? reusable?.bitmaps ?? BitmapFrameStore() : nil,
-                             videos: hasVideos ? reusable?.videos ?? VideoFrameStore() : nil,
+                             videos: videos,
                              animatedImages: !animatedMaterialIDs.isEmpty ?
                                 reusable?.animatedImages ?? AnimatedImageFrameStore() : nil,
                              animatedMaterialIDs: animatedMaterialIDs,

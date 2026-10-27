@@ -4,7 +4,7 @@
 
 组件使用 Swift 和 Metal 实现，运行时只依赖系统框架。业务可以使用同一份 PAG 模板，填入不同用户的昵称、头像、活动文案和动态素材，无需重新导出动画。
 
-本文对照当前公开 API 和 Demo 功能编写，更新于 **2026-10-23**。先看功能总览了解组件能做什么，再按需要阅读对应用法。
+本文对照当前公开 API 和 Demo 功能编写，更新于 **2026-10-27**。先看功能总览了解组件能做什么，再按需要阅读对应用法。
 
 ## 目录
 
@@ -552,6 +552,24 @@ func videoComposition(file: PAGFile, videoURL: URL, posterURL: URL) async throws
 }
 ```
 
+### 10.3 内嵌 H.264 的解码策略
+
+`PAGPlayer()` 等同于 `PAGPlayer(videoDecodingPolicy: .hardwareRequired)`，真实设备默认要求硬件解码，并核对系统实际硬解属性。模拟器沿用允许系统选择可用解码器的例外；模拟器播放成功不能当作真机硬解证据。
+
+业务希望允许系统选择可用解码路径时，在创建播放器时显式启用：
+
+```swift
+import pag_swift
+
+let player = PAGPlayer(videoDecodingPolicy: .automatic)
+```
+
+`.automatic` 使用 VideoToolbox 的 EnableHardware 选键，由系统选择可用硬解或其他解码路径；它不保证存在软件回退，也不吞掉解码失败。默认 `.hardwareRequired` 继续使用 RequireHardware；系统硬解资源暂不可用时可能报 `mediaFailure("h264Session:-12913")`，不能把它自动归因为 PAG 文件损坏。策略固定于该播放器生命周期，安装/更新合成、seek 和循环重建会话均沿用，不提供播放中修改策略的入口。
+
+此参数仅影响 PAG 文件内部的 H.264 序列，不影响外部 MP4/MOV 替换使用的 AVPlayer。两种策略共用原来的颜色、帧格式、预算、取消及 GPU 所有权校验。
+
+允许自动选择解码路径不等于提高了硬解容量；软件解码可能增加 CPU、内存和功耗。大量实例的峰值内存、持续帧率、温升与前后台恢复仍须在目标设备和真实素材上测量，不能因所有实例成功开始播放就宣称性能达标。实际会话查询见第 13.3 节。
+
 <a id="hosts"></a>
 
 ## 11. SwiftUI、UIKit、AppKit 与独立表面
@@ -703,9 +721,12 @@ import pag_swift
 | 提交与显示 | 提交/GPU 完成/系统呈现次数、过期呈现、跳过、drawable 不可用、请求合并、过期结果丢弃 |
 | 内存工作预算 | 当前帧 RGBA、GPU 输入留存/上限、局部效果纹理、Picture 纹理、动图留存/解码预留/预算 |
 | 动态内容运行 | 活动跑马灯实例、宿主帧变化/失败、最近宿主错误、动图待解码/解码中数量 |
+| 内嵌视频解码 | `videoDecodingPolicy`、`hardwareVideoDecoderSessions`、`softwareVideoDecoderSessions`、`unknownVideoDecoderSessions` |
 | `events` | 最近 128 条准备、提交、GPU 完成、实际呈现、跳过、目标不可用、合并、丢弃事件 |
 
 通过 `await player.diagnostics` 读取播放诊断；没有安装会话时可能为 `nil`。字段值为 `nil` 表示未执行或未观测，不能当作 0。加载共享等待与解析可能重叠，不能简单相加；GPU 完成次数不能直接换算屏幕 FPS。
+
+视频解码计数是最近已准备帧观察到的该视频 owner **当前开放会话**，不是累计创建次数，也不是全进程实时驻留总数。硬/软分类来自系统实际查询；未知单独保留，不能根据 `.automatic` 推断发生了软件回退。未观察或没有内嵌视频为 `nil`，快照可能滞后于后续清理。这些数值不代表 FPS 或系统剩余解码容量。
 
 加载报告、缓存统计、内容事件与播放诊断支持 `Codable`，可以用 `JSONEncoder` 导出。Demo 提供现成的 JSON 导出/分享界面；播放器不主动向磁盘写日志。
 

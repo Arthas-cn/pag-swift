@@ -61,10 +61,11 @@ public actor PAGPlayer {
     /// 每位消费者独立的 bufferingNewest(1) 生产端。
     private var observers: [UUID: AsyncStream<PAGPlaybackSnapshot>.Continuation] = [:]
 
-    /// 创建无合成、无显示目标的播放器；默认留边缩放，总共播放一次。
-    public init() {
+    /// 创建无合成、无显示目标的播放器；默认保留内嵌视频硬解要求，显式 automatic 才允许系统选路。
+    /// 策略固定于播放器生命周期，沿后续 setComposition、内容更新、seek 与循环传递，不承诺并发容量。
+    public init(videoDecodingPolicy: PAGVideoDecodingPolicy = .hardwareRequired) {
         submitter = nil
-        operations = PlaybackOperations()
+        operations = PlaybackOperations(videoDecodingPolicy: videoDecodingPolicy)
     }
 
     /// 内部测试注入真实协议边界与可控时钟，不创建平台刷新计时器。

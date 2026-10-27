@@ -9,6 +9,8 @@ actor VideoFrameStore {
     nonisolated var unownedExecutor: UnownedSerialExecutor { executor.asUnownedSerialExecutor() }
     /// 关闭工作在此等待同步decode退出后才失效；每次会话替换前排空，不让MainActor等待。
     private let cleanup = DispatchQueue(label: "pag.video.cleanup", qos: .userInitiated)
+    /// owner 创建后不变的内嵌视频策略，后续 seek 和循环重建会话仍使用同一值。
+    nonisolated let decodingPolicy: PAGVideoDecodingPolicy
     /// 库保留的像素输入上限，不伪称包含系统不可见的解码参考帧。
     private let maximumBytes: Int
     /// 可选内部验收观察点，可以来自系统回调或清理队列；不允许在闭包里直接访问actor状态。
@@ -18,8 +20,9 @@ actor VideoFrameStore {
     /// 累计实际提交给VT的样本数，供内部验证缓存/seek没有全片重解。
     private(set) var decodedSampleCount = 0
 
-    /// 设置库输入工作集预算；零或负值会在请求时明确失败。
-    init(maximumBytes: Int = 64 * 1024 * 1024, onEvent: (@Sendable (VideoDecodeEvent) -> Void)? = nil) {
+    /// 设置库输入工作集预算与固定解码策略；零或负预算在请求时明确失败，默认维持硬解要求。
+    init(maximumBytes: Int = 64 * 1024 * 1024, decodingPolicy: PAGVideoDecodingPolicy = .hardwareRequired, onEvent: (@Sendable (VideoDecodeEvent) -> Void)? = nil) {
+        self.decodingPolicy = decodingPolicy
         self.maximumBytes = maximumBytes
         self.onEvent = onEvent
     }
@@ -36,6 +39,24 @@ actor VideoFrameStore {
 
     /// 返回库保留的实际缓冲成本，不包含调用方已经取得的交接槽或系统参考帧。
     func retainedBytes() -> Int { entries.reduce(0) { $0 + $1.byteCount } }
+
+    /// 读取实际仍开放的会话，调用方不得把配置 automatic 等同于已发生软件回退。
+    func decoderDiagnostics() -> VideoDecoderDiagnostics {
+        var value = VideoDecoderDiagnostics(policy: decodingPolicy)
+        for entry in entries {
+            // 缓存记录可暂时保留已关闭会话；它不占实际解码会话数。
+            guard let session = entry.session, session.lifetime.isOpen else { continue }
+            switch session.usesHardwareDecoder {
+            // 只有系统明确返回 true 才计入硬解。
+            case true?: value.hardwareSessions += 1
+            // 系统明确 false 才说明本会话使用非硬件解码。
+            case false?: value.softwareSessions += 1
+            // 查询失败保留未知，不根据策略推测实际实现。
+            case nil: value.unknownSessions += 1
+            }
+        }
+        return value
+    }
 
     /// 缓存会话数量，最多4；仅用于内部压力和淘汰验证。
     func retainedSequenceCount() -> Int { entries.count }
@@ -98,7 +119,7 @@ actor VideoFrameStore {
             entry.pending.removeAll()
             try Task.checkCancellation()
             let observer = onEvent
-            entry.session = try H264Session(sequence: sequence, cleanup: cleanup,
+            entry.session = try H264Session(sequence: sequence, cleanup: cleanup, decodingPolicy: decodingPolicy,
                                             willWaitForDecode: { observer?(.waitingForDecode) },
                                             willInvalidate: { observer?(.invalidating) })
             entry.nextIndex = keyframe
