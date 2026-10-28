@@ -74,10 +74,12 @@ struct FramePresentationReceipt: Sendable {
 }
 
 /// 在 command buffer `present` 之前登记屏幕呈现回调。
-/// 真机和 macOS 使用头文件里的 `addPresentedHandler`。iOS 模拟器 SDK 的 `MTLDrawable` 没有这个方法和 `presentedTime`，预览会因此编不过；模拟器改为运行时选择子，没有实现就不登记。
+/// 真机和 macOS 使用系统 API；模拟器缺少公开的呈现通知，故不登记，也不激活依赖实际呈现的附加时钟。
 func registerDrawablePresentation(_ drawable: any MTLDrawable, receipt: FramePresentationReceipt) {
     #if targetEnvironment(simulator)
-    registerSimulatorDrawablePresentation(drawable, receipt: receipt)
+    // Simulator SDK 的 MTLDrawable.h 未声明这两个 API，当前运行时也不响应对应选择子。
+    // 不绕过 SDK 调用隐藏实现；没有实际呈现证据时保留诊断 nil，不能用 GPU 完成时间冒充。
+    return
     #else
     drawable.addPresentedHandler { displayed in
         // Core Animation 可能仍持有 drawable 内部锁；只读标量并异步交付，不能同步取播放门。
@@ -85,32 +87,3 @@ func registerDrawablePresentation(_ drawable: any MTLDrawable, receipt: FramePre
     }
     #endif
 }
-
-#if targetEnvironment(simulator)
-/// 模拟器头文件缺失时的呈现登记。选择子不存在就返回，不用 GPU 完成时间冒充 `presentedTime`。
-private func registerSimulatorDrawablePresentation(_ drawable: any MTLDrawable, receipt: FramePresentationReceipt) {
-    let selector = NSSelectorFromString("addPresentedHandler:")
-    // 头文件删掉了方法，不代表每个 drawable 都实现了；先问运行时，避免预览里 unrecognized selector。
-    guard let object = drawable as? NSObject, object.responds(to: selector) else { return }
-    #if arch(arm64)
-    let timeSelector = NSSelectorFromString("presentedTime")
-    let block: @convention(block) (AnyObject) -> Void = { displayed in
-        guard let displayed = displayed as? NSObject, displayed.responds(to: timeSelector) else { return }
-        // 与直接读 presentedTime 相同，只取标量。arm64 的浮点返回走普通方法调用约定。
-        let timeIMP = unsafeBitCast(displayed.method(for: timeSelector), to: PresentedTimeIMP.self)
-        receipt.presented(at: timeIMP(displayed, timeSelector))
-    }
-    let imp = unsafeBitCast(object.method(for: selector), to: AddPresentedHandlerIMP.self)
-    // 系统会复制 block；调用期间仍保住这份闭包，避免登记完成前被释放。
-    withExtendedLifetime(block) { imp(object, selector, block) }
-    #endif
-}
-
-/// `addPresentedHandler:` 的运行时函数类型。第三个参数是 ObjC block。
-private typealias AddPresentedHandlerIMP = @convention(c) (
-    AnyObject, Selector, @convention(block) (AnyObject) -> Void
-) -> Void
-
-/// `presentedTime` 的运行时函数类型。只在 arm64 模拟器使用，返回值是 host time 秒。
-private typealias PresentedTimeIMP = @convention(c) (AnyObject, Selector) -> Double
-#endif
