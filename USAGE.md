@@ -89,20 +89,20 @@
 | --- | --- |
 | 工具链 | Xcode 27、Swift 6.4 |
 | 最低系统 | iOS 26.0、macOS 26.0 |
-| 本地 SPM 包 | `packages/pag-swift` |
+| 本地 SPM 包 | 仓库根（含 `Package.swift` 与 `Sources/`） |
 | 远程 SPM | 仓库根 `https://github.com/Arthas-cn/pag-swift.git` |
 | Library product | `pag-swift` |
 | Swift 模块 | `import pag_swift` |
 | 显示 | Metal 设备与可用的显示目标 |
 | 依赖 | 库使用系统框架，不依赖原版 libpag、VAPPlayerKit 或 SDWebImage |
 
-在 Xcode 中选择 **File → Add Package Dependencies → Add Local**，选择 `packages/pag-swift`，把 `pag-swift` product 加入实际使用的 App target。不要把包的 Sources 再加入 App 的 Compile Sources。
+在 Xcode 中选择 **File → Add Package Dependencies → Add Local**，选择仓库根目录，把 `pag-swift` product 加入实际使用的 App target。不要把包的 Sources 再加入 App 的 Compile Sources。
 
-已有 SPM 工程可加入以下条目。本地路径按宿主位置调整；远程依赖使用仓库根，不要写成 `packages/pag-swift` 子目录。
+已有 SPM 工程可加入以下条目。本地路径按宿主位置调整，指到含 `Package.swift` 的仓库根。
 
 ```swift
 // dependencies 中，二选一：
-.package(path: "../libpag-swift/packages/pag-swift")
+.package(path: "../libpag-swift")
 .package(url: "https://github.com/Arthas-cn/pag-swift.git", branch: "main")
 
 // 使用库的 target.dependencies 中：
@@ -809,15 +809,15 @@ Demo 是功能体验和验收入口，库 API 范围更完整：例如外部视�
 从仓库根目录运行库回归，不需要选择 iOS 设备：
 
 ```sh
-swift test --package-path packages/pag-swift -j 4
+swift test -j 4
 
 # 全资源原尺寸与小宿主的首/中/末帧计划和 Metal 准备。
 PAG_RESOURCE_AUDIT=1 PAG_RESOURCE_AUDIT_SMALL_HOST=1 \
-  swift test --package-path packages/pag-swift -j 4 --filter PAGResourcePlaybackAuditTests
+  swift test -j 4 --filter PAGResourcePlaybackAuditTests
 
 # 截断文字复用成本；输出 CPU 耗时，不换算屏幕 FPS。
 PAG_TEXT_REUSE_BENCHMARK=1 \
-  swift test --package-path packages/pag-swift -j 4 --filter TruncatedTextReuseTests
+  swift test -j 4 --filter TruncatedTextReuseTests
 ```
 
 Demo 编译/安装前按仓库约定选择已有设备：

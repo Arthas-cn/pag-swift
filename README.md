@@ -8,10 +8,10 @@
 - [动态内容业务接入](Docs/动态内容业务接入.md)：槽位、宿主动图、遮罩及业务适配。
 - [格式支持矩阵](Docs/格式支持矩阵.md)：格式证据与历史验收记录。
 
-最低系统为 iOS 26 / macOS 26。远程 SPM 直接使用仓库根，product 为 `pag-swift`，Swift 导入名为 `pag_swift`。本地开发与测试仍用 `packages/pag-swift`。Demo 在 `app/pag-swift-demo`。
+最低系统为 iOS 26 / macOS 26。远程和本地 SPM 都使用仓库根，product 为 `pag-swift`，Swift 导入名为 `pag_swift`。源码在 `Sources/pag_swift`。Demo 在 `app/pag-swift-demo`。
 
 ```sh
-swift test --package-path packages/pag-swift -j 4
+swift test -j 4
 ```
 
 当前仓库的 126 份 PAG 样例通过首、中、末帧的加载和 Metal 输入准备，包括小尺寸缩放宿主。此结果不等于完整 PAG 格式兼容，也不等于所有设备上的逐帧视觉及性能验收。

@@ -28,7 +28,6 @@
 
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* pag-swift-demo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pag-swift-demo.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		C9976A90306A14EA007747FB /* pag-swift */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = "pag-swift"; path = "../../packages/pag-swift"; sourceTree = "<group>"; };
 		D1A0F11E0000000000000001 /* resources */ = {isa = PBXFileReference; lastKnownFileType = folder; name = resources; path = ../../resources; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -56,7 +55,6 @@
 		000000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
-				C9976A90306A14EA007747FB /* pag-swift */,
 				000000000000000000000010 /* pag-swift-demo */,
 				D1A0F11E0000000000000001 /* resources */,
 				C9976A91306A1507007747FB /* Frameworks */,
@@ -133,7 +131,7 @@
 			mainGroup = 000000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../../packages/pag-swift" */,
+				D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../.." */,
 				C989FF80308A05D600DE657B /* XCRemoteSwiftPackageReference "SDWebImage" */,
 				C989FF85308A06A500DE657B /* XCRemoteSwiftPackageReference "SDWebImageWebPCoder" */,
 			);
@@ -160,7 +158,7 @@
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			inputPaths = (
-				"$(SRCROOT)/../../packages/pag-swift/Package.swift",
+				"$(SRCROOT)/../../Package.swift",
 				"$(SRCROOT)/../../scripts/write-demo-build-info.py",
 				"$(SRCROOT)/pag-swift-demo.xcodeproj/project.pbxproj",
 				"$(SRCROOT)/pag-swift-demo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
@@ -422,9 +420,9 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../../packages/pag-swift" */ = {
+		D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../.." */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../packages/pag-swift";
+			relativePath = "../..";
 		};
 /* End XCLocalSwiftPackageReference section */
 
@@ -465,7 +463,7 @@
 		};
 		C9976A92306A1507007747FB /* pag-swift */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../../packages/pag-swift" */;
+			package = D1A0F11E0000000000000003 /* XCLocalSwiftPackageReference "../.." */;
 			productName = "pag-swift";
 		};
 /* End XCSwiftPackageProductDependency section */

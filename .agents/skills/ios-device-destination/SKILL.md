@@ -9,7 +9,7 @@ description: >
 
 # iOS 设备选择
 
-本仓库最低部署 **iOS 26 / macOS 26**。`packages/pag-swift` 的测试在仓库根或包目录用 `swift test`，不要为了测库去选设备。本脚本只选 iOS destination；macOS 演示工程用 `-destination 'platform=macOS'`，不要套用本脚本的 iPhone 结果。
+本仓库最低部署 **iOS 26 / macOS 26**。库测试在仓库根用 `swift test`，不要为了测库去选设备。本脚本只选 iOS destination；macOS 演示工程用 `-destination 'platform=macOS'`，不要套用本脚本的 iPhone 结果。
 
 **其他 Agent 不要手写解析 `devicectl` 表格。** 只运行本 skill 的脚本，用它打印的 `xcodebuild_destination` / `udid` / `core_device_identifier`。
 

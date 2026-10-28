@@ -12,7 +12,7 @@ root = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2])
 # 只读取脚本声明的四个输入文件；保留 Xcode 脚本沙箱，不为诊断放宽整个源码树访问。
 # UUID 区分每个实际构建，配置摘要仅说明编译/依赖配置相同，不能冒充完整源码摘要。
-files = [root / 'packages/pag-swift/Package.swift', Path(__file__).resolve(),
+files = [root / 'Package.swift', Path(__file__).resolve(),
          root / 'app/pag-swift-demo/pag-swift-demo.xcodeproj/project.pbxproj',
          root / 'app/pag-swift-demo/pag-swift-demo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved']
 digest = hashlib.sha256()

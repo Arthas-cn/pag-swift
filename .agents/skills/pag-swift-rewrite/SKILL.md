@@ -17,7 +17,7 @@ description: >
 
 | 路径 | 职责 |
 | --- | --- |
-| `packages/pag-swift` | 库。解码、场景图、时间轴、播放、渲染表面、替换 |
+| `Sources/pag_swift`、`Tests/pag_swiftTests` | 库。解码、场景图、时间轴、播放、渲染表面、替换。清单只有仓库根 `Package.swift` |
 | `app/pag-swift-demo` | 验证集成的 SwiftUI demo，不是库本体 |
 | `resources/` | `.pag` 夹具。demo 以目录引用整份文件夹；测试包通过 `Tests/pag_swiftTests/Resources` 符号链接看到同一目录 |
 | `Docs/核心实现.md` | 后续实现的合同 |
@@ -72,7 +72,7 @@ description: >
 
 ## 测试
 
-- 库：在 `packages/pag-swift` 用 `swift test`（Swift Testing）。
+- 库：在仓库根用 `swift test`（Swift Testing）。
 - demo 的安装、界面、真机或模拟器才用 `xcodebuild`，并先走 `ios-device-destination`。macOS 目标用 `platform=macOS`。
 - 优先覆盖：加载成败、可见时间区间、进度与微秒不要混、替换后旧帧失效、播放器与表面的创建和释放。
 

@@ -21,7 +21,7 @@ macOS demo 可见验收由当前主任务串行调度；内部小段先做针对
 
 - 语言：Swift 6.4（Xcode 27 自带编译器）。工程写 `SWIFT_VERSION = 6.4`；Xcode 会映射为语言模式 Swift 6（`EFFECTIVE_SWIFT_VERSION = 6`）。按严格并发来写，并使用 Swift 6.4 语法。不要改回 `6.0` 或 5。库与 demo 都开启 Approachable Concurrency。**库的默认 actor isolation 为 `nonisolated`。**
 - 平台：iOS 26.0 与 macOS 26.0 为最低部署版本。可以放心使用这两个系统的 26 API；不要为更早系统加 `#available` 回退或旧架构兼容层，除非任务明确要求。不要在没有任务时把包或工程扩到 watchOS、tvOS、visionOS。
-- 目标：用 Swift **重写** libpag（PAG 矢量动画），不是给上游 C++ 库做永久包装。库在 `packages/pag-swift`；`app/pag-swift-demo` 只验证集成。
+- 目标：用 Swift **重写** libpag（PAG 矢量动画），不是给上游 C++ 库做永久包装。库在仓库根的 `Sources/pag_swift` 与 `Tests/pag_swiftTests`，只有一份根 `Package.swift`。`app/pag-swift-demo` 只验证集成。不要把库源码放进名为 `packages` 或 `Packages` 的目录，也不要再加子目录清单；Xcode 展示远程依赖时会藏起这个保留目录。
 - `Docs/核心实现.md` 只写技术基线、核心功能和背景，不规定类型划分和公开签名。架构由后续文档决定。对照旧 `PAG*` 只用于核对职责。禁止把 ObjC 头文件机械翻译成 Swift。
 - 渲染：Metal，直接画到显示目标。播放优先，热路径不要先离屏再拷贝，也不要为播放把像素读回 CPU。不要移植原版的 OpenGL / CGL。离屏出图不是必须能力。
 - 界面：SwiftUI、UIKit，以及 macOS 的 AppKit 都要能播。demo 用库的显示能力做验证，不在 App 里另写一套播放器。
@@ -33,7 +33,7 @@ macOS demo 可见验收由当前主任务串行调度；内部小段先做针对
 ## R1 改动边界
 
 - 只改完成当前任务所需的代码，不顺手重构、不改无关行为。
-- 沿用仓库现有模块划分、命名和模式（`app/`、`packages/`）。目录是小写，不要改成 `Apps/` 或 `Packages/`。
+- 沿用仓库现有模块划分：库在仓库根 `Sources/`、`Tests/`，demo 在 `app/`。目录是小写。不要把库源码放进 `packages/` 或 `Packages/`。
 - 不引入任务未要求的依赖或新框架。终态不要把上游 libpag 二进制加进来当运行时依赖。
 - 不编造仓库里不存在的类型、API、文件或配置。不凭记忆编造 `.pag` 二进制布局。
 - 未要求时不改工程配置、不提交 git、不推远程。
@@ -187,7 +187,7 @@ func finish(_ result: Result<Value, Error>, sequence: Int) {
 
 | 文件 | 尽可能（软限制） | 硬限制 |
 | --- | --- | --- |
-| 生产代码（`app/` / `packages/` 源码） | 700 行 | 1200 行 |
+| 生产代码（`app/` / `Sources/` 源码） | 700 行 | 1200 行 |
 | 测试代码（`*Tests.swift` 等） | 1000 行 | 1200 行 |
 
 - 生产代码接近 600 行、测试接近 900 行时，按职责开拆，不要堆到软限制再拆。
@@ -215,7 +215,7 @@ func finish(_ result: Result<Value, Error>, sequence: Int) {
 
 ## R10 将本地 SPM 包接入 demo
 
-1. 确认 `packages/.../Package.swift` 声明了要使用的 library product，名称与工程中的 product 名一致。
+1. 确认仓库根 `Package.swift` 声明了要使用的 library product，名称与工程中的 product 名一致。
 2. 将本地包及其 product 加入实际使用它的 target（当前是 `app/pag-swift-demo`）。不能仅凭包文件夹出现在工程中，或仅新增 product 名称，就认为接入完成。
 3. 对每个使用该 product 的 target，检查其 `packageProductDependencies` 和 `Frameworks` 构建阶段均有对应引用。本地包路径必须是相对仓库的路径，不能提交只在本机绝对路径上可解析的引用。
 4. 若 demo 源码目录是文件系统同步文件夹，检查包源码没有被直接纳入 App target 编译。
@@ -223,12 +223,14 @@ func finish(_ result: Result<Value, Error>, sequence: Int) {
 
 ## R11 创建本地 SPM 包
 
-1. 按模块职责确定包名和 `packages/` 下的位置，确认目标目录尚不存在。
+本仓库已发布的 `pag-swift` 不使用这条路径。它只有仓库根上的一份 `Package.swift`，源码在 `Sources/pag_swift`。新的独立包不要放进名为 `packages` 或 `Packages` 的目录。
+
+1. 按模块职责确定包名和目录，确认目标目录尚不存在。不要使用 `packages/` 这个名字。
 2. 在新目录中运行 `swift package init`。以 library 包为例，从仓库根目录执行：
 
    ```sh
-   mkdir -p packages/ExampleModule
-   cd packages/ExampleModule
+   mkdir -p ExampleModule
+   cd ExampleModule
    swift package init --type library --name ExampleModule --enable-swift-testing --disable-xctest
    ```
 
