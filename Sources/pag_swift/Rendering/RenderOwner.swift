@@ -154,10 +154,8 @@ actor RenderOwner: PlaybackSubmitting {
                     let observe = self.observe
                     let receipt = FramePresentationReceipt(request: request, mailbox: mailbox,
                         placeholderIDs: placeholderIDs, marqueeIDs: marqueeIDs)
-                    drawable.addPresentedHandler { displayed in
-                        // Core Animation 可能仍持有 drawable 内部锁；只读标量并异步交付，不能同步取播放门。
-                        receipt.presented(at: displayed.presentedTime)
-                    }
+                    // 必须赶在 present 之前登记，系统才会把这次 drawable 的呈现时间送回来。
+                    registerDrawablePresentation(drawable, receipt: receipt)
                     buffer.addCompletedHandler { completed in
                         // 系统回调只转换状态并归还值租约，不读取actor字段或跨域传回裸buffer。
                         let outcome: Result<Bool, any Error>
