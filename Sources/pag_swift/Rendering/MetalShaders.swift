@@ -86,16 +86,21 @@ struct MetalPipelines {
     let fastBlurResample: any MTLRenderPipelineState
     /// Shape整层源图的Angle渐变叠加只写有界局部结果，根pass仍直画drawable。
     let gradientOverlay: any MTLRenderPipelineState
-    /// Apple GPU从当前颜色附件读取背景的HardLight；非Apple设备仅该材料明确unsupported。
+    /// 设备支持读取当前颜色附件时才提供 HardLight；nil 表示该混合模式不可用。
     let hardLightImage: (any MTLRenderPipelineState)?
-    /// Track Matte拥有者在遮罩结果上读取背景作HardLight；非Apple设备仅此材质不可用。
+    /// 支持颜色附件读取时提供带 Track Matte 的 HardLight；nil 与普通 HardLight 能力一致。
     let hardLightTrackMatteImage: (any MTLRenderPipelineState)?
 
     /// 首次使用时编译共享MSL并创建管线；任何编译/创建错误转换为可跨actor的领域错误。
     init(device: any MTLDevice) throws {
         try Task.checkCancellation()
         do {
+            #if targetEnvironment(simulator)
+            // 模拟器会报告 Apple GPU 家族，但管线拒绝读取当前颜色附件；只加载普通绘制所需的着色器。
+            let programmableBlend = false
+            #else
             let programmableBlend = device.supportsFamily(.apple2)
+            #endif
             let shader = MetalShaderSource.source +
                 (programmableBlend ? MetalHardLightShaderSource.source : "")
             let library = try device.makeLibrary(source: shader, options: nil)
